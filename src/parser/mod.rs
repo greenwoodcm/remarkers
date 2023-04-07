@@ -8,7 +8,7 @@ use common::*;
 use anyhow::Result;
 use std::fs::read;
 
-pub fn parse(s: ParserInput) -> ParserResult<(Version, Page)> {
+pub fn parse(s: ParserInput) -> ParserResult<(Version, Vec<Layer>)> {
     let (s, version) = header(s)?;
     println!("parsed header version {version:?}");
 
@@ -27,6 +27,7 @@ pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> 
 
     for page in notebook.pages.iter() {
         println!("processing page: {}", page.id);
+
         let page_path = notebook.root.join(format!("{}.rm", page.id));
 
         let contents = match read(&page_path) {
@@ -38,9 +39,12 @@ pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> 
         };
 
         match parse(&contents) {
-            Ok((_, (version, page))) => {
+            Ok((_, (version, layers))) => {
                 println!("Parsed successfully: {version:?}");
-                pages.push(page);
+                pages.push(Page {
+                    id: page.id.clone(),
+                    layers,
+                });
             }
             Err(e) => {
                 // let f: String = e;
@@ -50,5 +54,8 @@ pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> 
         }
     }
 
-    Ok(Notebook { pages })
+    Ok(Notebook {
+        id: notebook.name,
+        pages,
+    })
 }

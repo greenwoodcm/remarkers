@@ -20,11 +20,13 @@ impl TryFrom<char> for Version {
 
 #[derive(Debug)]
 pub struct Notebook {
+    pub id: String,
     pub pages: Vec<Page>,
 }
 
 #[derive(Debug)]
 pub struct Page {
+    pub id: String,
     pub layers: Vec<Layer>,
 }
 

@@ -63,8 +63,8 @@ fn point(s: ParserInput) -> ParserResult<Point> {
     ))
 }
 
-pub fn read_page_v5(s: ParserInput) -> ParserResult<Page> {
+pub fn read_page_v5(s: ParserInput) -> ParserResult<Vec<Layer>> {
     let (s, num_layers) = num_layers(s)?;
     let (s, layers) = count(layer, num_layers as _)(s)?;
-    Ok((s, Page { layers }))
+    Ok((s, layers))
 }

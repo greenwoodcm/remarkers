@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use super::common::*;
 use crate::model::{self, content::*};
 
-use nom::{bytes::complete::take, multi::many1};
+use nom::{
+    bytes::complete::take,
+    multi::{count, many1},
+};
 use tracing::{info, trace, warn};
 
 fn varuint(s: ParserInput) -> ParserResult<u64> {
@@ -44,7 +47,7 @@ enum TagType {
 }
 
 impl TryFrom<u64> for TagType {
-    type Error = ();
+    type Error = u64;
 
     fn try_from(value: u64) -> std::result::Result<Self, Self::Error> {
         match value {
@@ -53,7 +56,7 @@ impl TryFrom<u64> for TagType {
             0x8 => Ok(Self::Byte8),
             0x4 => Ok(Self::Byte4),
             0x1 => Ok(Self::Byte1),
-            _ => Err(()),
+            other => Err(other),
         }
     }
 }
@@ -69,6 +72,7 @@ fn stream_tag(
             nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
         })?;
 
+        trace!("comparing {expected_index}, {expected_tag_type:?} == {index}, {tag_type:?}");
         if index != expected_index {
             return Err(nom::Err::Error(nom::error::Error::new(
                 s,
@@ -123,12 +127,40 @@ fn tagged_id(expected_index: u64) -> impl Fn(ParserInput) -> ParserResult<CrdtId
     }
 }
 
-struct LineItemBlock {
-    parent_id: CrdtId,
-    item_id: CrdtId,
-    left_id: CrdtId,
-    right_id: CrdtId,
-    subblock: LineItemSubblock,
+#[derive(Debug, PartialEq)]
+enum BlockType {
+    SceneItem,
+    AuthorInfo,
+    PageInfo,
+}
+
+impl TryFrom<u8> for BlockType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x05 => Ok(BlockType::SceneItem),
+            0x09 => Ok(BlockType::AuthorInfo),
+            0x0A => Ok(BlockType::PageInfo),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ItemType {
+    Line,
+}
+
+impl TryFrom<u8> for ItemType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x03 => Ok(ItemType::Line),
+            _ => Err(()),
+        }
+    }
 }
 
 struct LineItemSubblock {
@@ -140,6 +172,237 @@ struct LineItemSubblock {
     points: Vec<Point>,
 }
 
+struct Block<T> {
+    parent_id: CrdtId,
+    item_id: CrdtId,
+    left_id: CrdtId,
+    right_id: CrdtId,
+    subblock: T,
+}
+
+type LineItemBlock = Block<LineItemSubblock>;
+
+fn point(version: u8) -> impl Fn(ParserInput) -> ParserResult<Point> {
+    move |s| {
+        let (s, x) = f32(s)?;
+        let x = x + (model::WIDTH_PIXELS / 2) as f32;
+
+        let (s, y) = f32(s)?;
+        let (s, speed, direction, width, pressure) = match version {
+            1 => {
+                let (s, speed) = f32(s)?;
+                let (s, width) = f32(s)?;
+                let (s, direction) = f32(s)?;
+                let (s, pressure) = f32(s)?;
+                (
+                    s,
+                    speed * 4.0,
+                    255.0 * width / (std::f32::consts::PI * 2.0),
+                    direction * 4.0,
+                    pressure * 255.0,
+                )
+            }
+            2 => {
+                let (s, speed) = u16(s)?;
+                let (s, width) = u16(s)?;
+                let (s, direction) = u8(s)?;
+                let (s, pressure) = u8(s)?;
+                (
+                    s,
+                    speed as f32,
+                    width as f32,
+                    direction as f32,
+                    pressure as f32,
+                )
+            }
+            other => panic!("unrecognized version {other}"),
+        };
+
+        // adjust width
+        let width = width * 2.0 / 255.0;
+        trace!("point: {x}, {y}, {speed}, {direction}, {width}, {pressure}");
+        Ok((
+            s,
+            Point {
+                x,
+                y,
+                speed,
+                direction,
+                width,
+                pressure,
+            },
+        ))
+    }
+}
+
+fn line_item_subblock(version: u8) -> impl Fn(ParserInput) -> ParserResult<LineItemSubblock> {
+    move |s| {
+        // read tag values
+        let (s, brush_type_id) = tagged_u32(1)(s)?;
+        let brush_type: BrushType = brush_type_id.try_into().map_err(|_| {
+            nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
+        })?;
+        let (s, color_id) = tagged_u32(2)(s)?;
+        let color: Color = color_id.try_into().map_err(|_| {
+            nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
+        })?;
+        let (s, thickness_scale) = tagged_f64(3)(s)?;
+        let (s, starting_length) = tagged_f32(4)(s)?;
+
+        trace!("brush type: {brush_type:?}, color id: {color_id}, thickness scale: {thickness_scale}, starting len: {starting_length}");
+
+        // read another subblock for the point vector
+        let (s, _) = stream_tag(5, TagType::Length4)(s)?;
+        let (s, subsubblock_len) = u32(s)?;
+
+        trace!("subsubblock length: {}", subsubblock_len);
+
+        let point_size = match version {
+            1 => 0x18,
+            2 => 0x0E,
+            other => panic!("unrecognized version {other}"),
+        };
+
+        if subsubblock_len % point_size != 0 {
+            warn!("subsubblock is not evenly divisible into points");
+        }
+
+        let (sb, s) = s.split_at(subsubblock_len as _);
+        let point_count = subsubblock_len / point_size;
+        trace!("point count: {point_count}");
+        let (sb, points) = count(point(version), point_count as _)(sb)?;
+
+        if sb.is_empty() {
+            trace!("emptied points subblock");
+        } else {
+            warn!(
+                "did not drain line item subblock, expected len {subsubblock_len}, remaining {}",
+                sb.len()
+            );
+        }
+
+        Ok((
+            s,
+            LineItemSubblock {
+                brush_type,
+                color,
+                thickness_scale,
+                starting_length,
+                points,
+            },
+        ))
+    }
+}
+
+fn scene_item_block<T, S>(
+    expected_item_type: ItemType,
+    subblock_parser: T,
+) -> impl Fn(ParserInput) -> ParserResult<Option<Block<S>>>
+where
+    T: Fn(ParserInput) -> ParserResult<S>,
+{
+    move |s| {
+        let (s, parent_id) = tagged_id(1)(s)?;
+        let (s, item_id) = tagged_id(2)(s)?;
+        let (s, left_id) = tagged_id(3)(s)?;
+        let (s, right_id) = tagged_id(4)(s)?;
+        let (s, deleted_len) = tagged_u32(5)(s)?;
+        trace!("parsed block level meta: parent {parent_id:?}, item {item_id:?}, left {left_id:?}, right {right_id:?}, deleted len {deleted_len}");
+
+        // in some cases the block header is not followed by a corresponding subblock tag and length.
+        // in these cases we just proceed and ignore the block.
+        let (s, _) = match stream_tag(6, TagType::Length4)(s) {
+            Ok(val) => val,
+            Err(_) => return Ok((s, None)),
+        };
+
+        let (s, subblock_len) = u32(s)?;
+        trace!("subblock len {subblock_len}");
+
+        let (sb, s) = s.split_at(subblock_len as _);
+        let (sb, item_type) = u8(sb)?;
+        let item_type: Result<ItemType, _> = item_type.try_into();
+        trace!("item type: {item_type:?}");
+
+        if item_type.is_err() || item_type.unwrap() != expected_item_type {
+            return Ok((s, None));
+        }
+
+        let (sb, subblock) = subblock_parser(sb)?;
+        if !sb.is_empty() {
+            warn!(
+                "subblock not empty, expected subblock length {}, remaining length {}",
+                subblock_len,
+                sb.len(),
+            )
+        }
+
+        Ok((
+            s,
+            Some(Block {
+                parent_id,
+                item_id,
+                left_id,
+                right_id,
+                subblock,
+            }),
+        ))
+    }
+}
+
+fn author_id_block(s: ParserInput) -> ParserResult<()> {
+    let (s, _) = stream_tag(0, TagType::Length4)(s)?;
+    let (s, subblock_len) = u32(s)?;
+    trace!("subblock len {subblock_len}");
+
+    let (sb, s) = s.split_at(subblock_len as _);
+    let (sb, _uuid_len) = varuint(sb)?;
+
+    let (sb, uuid_bytes) = take(16usize)(sb)?;
+    let uuid = uuid::Uuid::from_slice_le(uuid_bytes).unwrap();
+    trace!("uuid: {uuid}");
+
+    let (sb, author_id) = u16(sb)?;
+    trace!("author id: {author_id}");
+
+    if !sb.is_empty() {
+        warn!(
+            "subblock not empty, expected subblock length {}, remaining length {}",
+            subblock_len,
+            sb.len(),
+        )
+    }
+
+    Ok((s, ()))
+}
+
+fn author_ids_block(s: ParserInput) -> ParserResult<()> {
+    trace!("parsing author IDs block");
+    let (s, num_subblocks) = varuint(s)?;
+    trace!("found {num_subblocks} subblocks");
+
+    let (s, _author_ids) = count(author_id_block, num_subblocks as _)(s)?;
+    Ok((s, ()))
+}
+
+fn page_info_block(s: ParserInput) -> ParserResult<()> {
+    trace!("parsing page info block");
+    let (s, loads_count) = tagged_u32(1)(s)?;
+    let (s, merges_count) = tagged_u32(2)(s)?;
+    let (s, text_chars_count) = tagged_u32(3)(s)?;
+    let (s, text_lines_count) = tagged_u32(4)(s)?;
+    trace!("loads: {loads_count}, merges: {merges_count}, text chars: {text_chars_count}, text lines: {text_lines_count}");
+
+    let s = if s.is_empty() {
+        s
+    } else {
+        let (s, _) = tagged_u32(5)(s)?;
+        s
+    };
+
+    Ok((s, ()))
+}
+
 fn read_block_v6(s: ParserInput) -> ParserResult<Option<LineItemBlock>> {
     let (s, block_len) = u32(s)?;
     trace!("read block length: {block_len}");
@@ -148,219 +411,31 @@ fn read_block_v6(s: ParserInput) -> ParserResult<Option<LineItemBlock>> {
     let (s, min_version) = u8(s)?;
     let (s, current_version) = u8(s)?;
     let (s, block_type) = u8(s)?;
-    trace!("block meta: {min_version}, {current_version}, {block_type}");
+    let block_type: Result<BlockType, _> = block_type.try_into();
+    trace!("block meta: {min_version}, {current_version}, {block_type:?}");
 
     let (b, s) = s.split_at(block_len as _);
     let (b, block) = match block_type {
-        0x05 => {
-            trace!("parsing block 5");
+        Ok(BlockType::SceneItem) => {
+            trace!("reading line item");
+            let item_parser = line_item_subblock(current_version);
+            let block_parser = scene_item_block(ItemType::Line, item_parser);
 
-            // read top-level block content
-            let (b, parent_id) = tagged_id(1)(b)?;
-            let (b, item_id) = tagged_id(2)(b)?;
-            let (b, left_id) = tagged_id(3)(b)?;
-            let (b, right_id) = tagged_id(4)(b)?;
-            let (b, deleted_len) = tagged_u32(5)(b)?;
-            trace!("parsed block level meta: parent {parent_id:?}, item {item_id:?}, left {left_id:?}, right {right_id:?}, deleted len {deleted_len}");
+            let (sb, subblock) = block_parser(b)?;
+            warn!("remaining subblock len: {}", sb.len());
 
-            // read subblock content only if it leads with a tagged length
-            let (b, subblock) = match stream_tag(6, TagType::Length4)(b) {
-                Ok((_forward_slice, _)) => {
-                    trace!("found subchunk");
-
-                    let (b, _) = stream_tag(6, TagType::Length4)(b)?;
-                    let (b, subblock_len) = u32(b)?;
-                    trace!("subblock len {subblock_len}");
-
-                    let (sb, b) = b.split_at(subblock_len as _);
-                    let (sb, item_type) = u8(sb)?;
-                    trace!("item type: {item_type}");
-
-                    let (sb, subblock) = match item_type {
-                        0x03 => {
-                            trace!("reading line item");
-
-                            // read tag values
-                            let (sb, brush_type_id) = tagged_u32(1)(sb)?;
-                            let brush_type: BrushType = brush_type_id.try_into().map_err(|_| {
-                                nom::Err::Error(nom::error::Error::new(
-                                    s,
-                                    nom::error::ErrorKind::NoneOf,
-                                ))
-                            })?;
-                            let (sb, color_id) = tagged_u32(2)(sb)?;
-                            let color: Color = color_id.try_into().map_err(|_| {
-                                nom::Err::Error(nom::error::Error::new(
-                                    s,
-                                    nom::error::ErrorKind::NoneOf,
-                                ))
-                            })?;
-                            let (sb, thickness_scale) = tagged_f64(3)(sb)?;
-                            let (sb, starting_length) = tagged_f32(4)(sb)?;
-
-                            trace!("brush type: {brush_type:?}, color id: {color_id}, thickness scale: {thickness_scale}, starting len: {starting_length}");
-
-                            // read another subblock for the point vector
-                            let (sb, _) = stream_tag(5, TagType::Length4)(sb)?;
-                            let (sb, subsubblock_len) = u32(sb)?;
-
-                            trace!("subsubblock length: {}", subsubblock_len);
-
-                            let point_size = match current_version {
-                                1 => 0x18,
-                                2 => 0x0E,
-                                other => panic!("unrecognized version {other}"),
-                            };
-
-                            if subsubblock_len % point_size != 0 {
-                                warn!("subsubblock is not evenly divisible into points");
-                            }
-
-                            let (ssb, sb) = sb.split_at(subsubblock_len as _);
-
-                            let mut loop_ssb = ssb;
-                            let mut points = Vec::new();
-                            let point_count = subsubblock_len / point_size;
-                            trace!("point count: {point_count}");
-                            for _ in 0..point_count {
-                                let (inner_ssb, x) = f32(loop_ssb)?;
-                                let x = x + (model::WIDTH_PIXELS / 2) as f32;
-
-                                let (inner_ssb, y) = f32(inner_ssb)?;
-                                let (inner_ssb, speed, direction, width, pressure) =
-                                    match current_version {
-                                        1 => {
-                                            let (inner_ssb, speed) = f32(inner_ssb)?;
-                                            let (inner_ssb, width) = f32(inner_ssb)?;
-                                            let (inner_ssb, direction) = f32(inner_ssb)?;
-                                            let (inner_ssb, pressure) = f32(inner_ssb)?;
-                                            (
-                                                inner_ssb,
-                                                speed * 4.0,
-                                                255.0 * width / (std::f32::consts::PI * 2.0),
-                                                direction * 4.0,
-                                                pressure * 255.0,
-                                            )
-                                        }
-                                        2 => {
-                                            let (inner_ssb, speed) = u16(inner_ssb)?;
-                                            let (inner_ssb, width) = u16(inner_ssb)?;
-                                            let (inner_ssb, direction) = u8(inner_ssb)?;
-                                            let (inner_ssb, pressure) = u8(inner_ssb)?;
-                                            (
-                                                inner_ssb,
-                                                speed as f32,
-                                                width as f32,
-                                                direction as f32,
-                                                pressure as f32,
-                                            )
-                                        }
-                                        other => panic!("unrecognized version {other}"),
-                                    };
-
-                                // adjust width
-                                let width = width * 2.0 / 255.0;
-                                trace!(
-                                    "point: {x}, {y}, {speed}, {direction}, {width}, {pressure}"
-                                );
-                                loop_ssb = inner_ssb;
-                                points.push(Point {
-                                    x,
-                                    y,
-                                    speed,
-                                    direction,
-                                    width,
-                                    pressure,
-                                });
-                            }
-
-                            (
-                                sb,
-                                Some(LineItemSubblock {
-                                    brush_type,
-                                    color,
-                                    thickness_scale,
-                                    starting_length,
-                                    points,
-                                }),
-                            )
-                        }
-                        other => {
-                            warn!("unrecognized item type: {other}");
-                            (sb, None)
-                        }
-                    };
-
-                    warn!("remaining subblock len: {}", sb.len());
-
-                    (b, subblock)
-                }
-                Err(_) => {
-                    info!("didn't find subchunk");
-                    (b, None)
-                }
-            };
-
-            let block = subblock.map(|subblock| LineItemBlock {
-                parent_id,
-                item_id,
-                left_id,
-                right_id,
-                subblock,
-            });
-            (b, block)
+            (b, subblock)
         }
-        0x09 => {
-            trace!("parsing author IDs block");
-            let (b, num_subblocks) = varuint(b)?;
-            trace!("found {num_subblocks} subblocks");
-
-            let mut outer_b = b;
-            for _ in 0..num_subblocks {
-                let (inner_b, _) = stream_tag(0, TagType::Length4)(outer_b)?;
-                let (inner_b, subblock_len) = u32(inner_b)?;
-                trace!("subblock len {subblock_len}");
-
-                let (inner_sb, inner_b) = inner_b.split_at(subblock_len as _);
-                let (inner_sb, _uuid_len) = varuint(inner_sb)?;
-
-                let (inner_sb, uuid_bytes) = take(16usize)(inner_sb)?;
-                let uuid = uuid::Uuid::from_slice_le(uuid_bytes).unwrap();
-                trace!("uuid: {uuid}");
-
-                let (inner_sb, author_id) = u16(inner_sb)?;
-                trace!("author id: {author_id}");
-
-                if !inner_sb.is_empty() {
-                    warn!(
-                        "subblock not empty, expected subblock length {}, remaining length {}",
-                        subblock_len,
-                        inner_sb.len(),
-                    )
-                }
-                outer_b = inner_b;
-            }
-            (outer_b, None)
-        }
-        0x0A => {
-            trace!("parsing page info block");
-            let (b, loads_count) = tagged_u32(1)(b)?;
-            let (b, merges_count) = tagged_u32(2)(b)?;
-            let (b, text_chars_count) = tagged_u32(3)(b)?;
-            let (b, text_lines_count) = tagged_u32(4)(b)?;
-            trace!("loads: {loads_count}, merges: {merges_count}, text chars: {text_chars_count}, text lines: {text_lines_count}");
-
-            let b = if b.is_empty() {
-                b
-            } else {
-                let (inner_b, _) = tagged_u32(5)(b)?;
-                inner_b
-            };
-
+        Ok(BlockType::AuthorInfo) => {
+            let (b, _) = author_ids_block(b)?;
             (b, None)
         }
-        other => {
-            warn!("unknown block type: {other}");
+        Ok(BlockType::PageInfo) => {
+            let (b, _) = page_info_block(b)?;
+            (b, None)
+        }
+        Err(_) => {
+            warn!("unknown block type");
             (b, None)
         }
     };
@@ -377,7 +452,7 @@ fn read_block_v6(s: ParserInput) -> ParserResult<Option<LineItemBlock>> {
     Ok((s, block))
 }
 
-pub fn read_page_v6(s: ParserInput) -> ParserResult<Page> {
+pub fn read_page_v6(s: ParserInput) -> ParserResult<Vec<Layer>> {
     let (s, blocks) = many1(read_block_v6)(s)?;
     info!("blocks length: {}", blocks.len());
     info!("remaining buffer len: {}", s.len());
@@ -406,12 +481,7 @@ pub fn read_page_v6(s: ParserInput) -> ParserResult<Page> {
 
     info!("found {} IDs: {all_ids:?}", all_ids.len());
 
-    Ok((
-        s,
-        Page {
-            layers: vec![Layer { lines }],
-        },
-    ))
+    Ok((s, vec![Layer { lines }]))
 }
 
 #[cfg(test)]
