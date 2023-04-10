@@ -5,6 +5,7 @@ use crate::model::{self, content::*};
 
 use nom::{
     bytes::complete::take,
+    error::ErrorKind,
     multi::{count, many1},
 };
 use tracing::{info, trace, warn};
@@ -70,15 +71,15 @@ fn stream_tag(
         let index = packed_val >> 4;
         let tag_type: TagType = (packed_val & 0b1111)
             .try_into()
-            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
+            .map_err(|_| error(s, ErrorKind::NoneOf))?;
 
         trace!("comparing {expected_index}, {expected_tag_type:?} == {index}, {tag_type:?}");
         if index != expected_index {
-            return Err(error(s, nom::error::ErrorKind::NoneOf));
+            return Err(error(s, ErrorKind::NoneOf));
         }
 
         if tag_type != expected_tag_type {
-            return Err(error(s, nom::error::ErrorKind::NoneOf));
+            return Err(error(s, ErrorKind::NoneOf));
         }
 
         Ok((s, ()))
@@ -118,6 +119,31 @@ fn tagged_id(expected_index: u64) -> impl Fn(ParserInput) -> ParserResult<CrdtId
         let (s, part1) = u8(s)?;
         let (s, part2) = varuint(s)?;
         Ok((s, CrdtId { part1, part2 }))
+    }
+}
+
+/// This combinator parses a segment of the stream that we know the length of.  In this case we want to align parsing
+/// of the next segment correctly, even if the `parser` passed in fails to drain all of the length of this segment.
+/// So in implementing this combinator we split off the known length of the segment, parse it, log if the parser failed
+/// to drain the segment, and return the tail so that future parsing is correctly aligned.
+fn fixed_length_segment<T>(
+    len: u32,
+    mut parser: impl FnMut(ParserInput) -> ParserResult<T>,
+) -> impl FnMut(ParserInput) -> ParserResult<T> {
+    move |s| {
+        let (head, tail) = s.split_at(len as _);
+        let (head, parsed) = parser(head)?;
+
+        if head.is_empty() {
+            trace!("succeeded draining fixed length segment of length {len}");
+        } else {
+            warn!(
+                "failed to drain fixed length segment of length {len}, remaining length {}",
+                head.len()
+            );
+        }
+
+        Ok((tail, parsed))
     }
 }
 
@@ -235,11 +261,11 @@ fn line_item_subblock(version: u8) -> impl Fn(ParserInput) -> ParserResult<LineI
         let (s, brush_type_id) = tagged_u32(1)(s)?;
         let brush_type: BrushType = brush_type_id
             .try_into()
-            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
+            .map_err(|_| error(s, ErrorKind::NoneOf))?;
         let (s, color_id) = tagged_u32(2)(s)?;
         let color: Color = color_id
             .try_into()
-            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
+            .map_err(|_| error(s, ErrorKind::NoneOf))?;
         let (s, thickness_scale) = tagged_f64(3)(s)?;
         let (s, starting_length) = tagged_f32(4)(s)?;
 
@@ -261,19 +287,12 @@ fn line_item_subblock(version: u8) -> impl Fn(ParserInput) -> ParserResult<LineI
             warn!("subsubblock is not evenly divisible into points");
         }
 
-        let (sb, s) = s.split_at(subsubblock_len as _);
         let point_count = subsubblock_len / point_size;
         trace!("point count: {point_count}");
-        let (sb, points) = count(point(version), point_count as _)(sb)?;
 
-        if sb.is_empty() {
-            trace!("emptied points subblock");
-        } else {
-            warn!(
-                "did not drain line item subblock, expected len {subsubblock_len}, remaining {}",
-                sb.len()
-            );
-        }
+        let (s, points) = fixed_length_segment(subsubblock_len, |s| {
+            count(point(version), point_count as _)(s)
+        })(s)?;
 
         Ok((
             s,
@@ -313,23 +332,17 @@ where
         let (s, subblock_len) = u32(s)?;
         trace!("subblock len {subblock_len}");
 
-        let (sb, s) = s.split_at(subblock_len as _);
-        let (sb, item_type) = u8(sb)?;
-        let item_type: Result<ItemType, _> = item_type.try_into();
-        trace!("item type: {item_type:?}");
+        let (s, subblock) = fixed_length_segment(subblock_len, |s| {
+            let (s, item_type) = u8(s)?;
+            let item_type: Result<ItemType, _> = item_type.try_into();
+            trace!("item type: {item_type:?}");
 
-        if item_type.is_err() || item_type.unwrap() != expected_item_type {
-            return Ok((s, None));
-        }
+            if item_type.is_err() || item_type.unwrap() != expected_item_type {
+                return Err(error(s, ErrorKind::NoneOf));
+            }
 
-        let (sb, subblock) = subblock_parser(sb)?;
-        if !sb.is_empty() {
-            warn!(
-                "subblock not empty, expected subblock length {}, remaining length {}",
-                subblock_len,
-                sb.len(),
-            )
-        }
+            subblock_parser(s)
+        })(s)?;
 
         Ok((
             s,
@@ -349,23 +362,18 @@ fn author_id_block(s: ParserInput) -> ParserResult<()> {
     let (s, subblock_len) = u32(s)?;
     trace!("subblock len {subblock_len}");
 
-    let (sb, s) = s.split_at(subblock_len as _);
-    let (sb, _uuid_len) = varuint(sb)?;
+    let (s, _) = fixed_length_segment(subblock_len, |s| {
+        let (s, _uuid_len) = varuint(s)?;
 
-    let (sb, uuid_bytes) = take(16usize)(sb)?;
-    let uuid = uuid::Uuid::from_slice_le(uuid_bytes).unwrap();
-    trace!("uuid: {uuid}");
+        let (s, uuid_bytes) = take(16usize)(s)?;
+        let uuid = uuid::Uuid::from_slice_le(uuid_bytes).unwrap();
+        trace!("uuid: {uuid}");
 
-    let (sb, author_id) = u16(sb)?;
-    trace!("author id: {author_id}");
+        let (s, author_id) = u16(s)?;
+        trace!("author id: {author_id}");
 
-    if !sb.is_empty() {
-        warn!(
-            "subblock not empty, expected subblock length {}, remaining length {}",
-            subblock_len,
-            sb.len(),
-        )
-    }
+        Ok((s, ()))
+    })(s)?;
 
     Ok((s, ()))
 }
@@ -408,8 +416,7 @@ fn read_block_v6(s: ParserInput) -> ParserResult<Option<LineItemBlock>> {
     let block_type: Result<BlockType, _> = block_type.try_into();
     trace!("block meta: {min_version}, {current_version}, {block_type:?}");
 
-    let (b, s) = s.split_at(block_len as _);
-    let (b, block) = match block_type {
+    let (s, block) = fixed_length_segment(block_len, |b| match block_type {
         Ok(BlockType::SceneItem) => {
             trace!("reading line item");
             let item_parser = line_item_subblock(current_version);
@@ -418,30 +425,21 @@ fn read_block_v6(s: ParserInput) -> ParserResult<Option<LineItemBlock>> {
             let (sb, subblock) = block_parser(b)?;
             warn!("remaining subblock len: {}", sb.len());
 
-            (b, subblock)
+            Ok((b, subblock))
         }
         Ok(BlockType::AuthorInfo) => {
             let (b, _) = author_ids_block(b)?;
-            (b, None)
+            Ok((b, None))
         }
         Ok(BlockType::PageInfo) => {
             let (b, _) = page_info_block(b)?;
-            (b, None)
+            Ok((b, None))
         }
         Err(_) => {
             warn!("unknown block type");
-            (b, None)
+            Ok((b, None))
         }
-    };
-
-    if b.is_empty() {
-        info!("drained all block content");
-    } else {
-        warn!(
-            "undrained block content, block length {block_len}, unread length {}",
-            b.len()
-        );
-    }
+    })(s)?;
 
     Ok((s, block))
 }
