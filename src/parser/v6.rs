@@ -68,23 +68,17 @@ fn stream_tag(
     move |s| {
         let (s, packed_val) = varuint(s)?;
         let index = packed_val >> 4;
-        let tag_type: TagType = (packed_val & 0b1111).try_into().map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
-        })?;
+        let tag_type: TagType = (packed_val & 0b1111)
+            .try_into()
+            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
 
         trace!("comparing {expected_index}, {expected_tag_type:?} == {index}, {tag_type:?}");
         if index != expected_index {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                s,
-                nom::error::ErrorKind::NoneOf,
-            )));
+            return Err(error(s, nom::error::ErrorKind::NoneOf));
         }
 
         if tag_type != expected_tag_type {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                s,
-                nom::error::ErrorKind::NoneOf,
-            )));
+            return Err(error(s, nom::error::ErrorKind::NoneOf));
         }
 
         Ok((s, ()))
@@ -239,13 +233,13 @@ fn line_item_subblock(version: u8) -> impl Fn(ParserInput) -> ParserResult<LineI
     move |s| {
         // read tag values
         let (s, brush_type_id) = tagged_u32(1)(s)?;
-        let brush_type: BrushType = brush_type_id.try_into().map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
-        })?;
+        let brush_type: BrushType = brush_type_id
+            .try_into()
+            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
         let (s, color_id) = tagged_u32(2)(s)?;
-        let color: Color = color_id.try_into().map_err(|_| {
-            nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf))
-        })?;
+        let color: Color = color_id
+            .try_into()
+            .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
         let (s, thickness_scale) = tagged_f64(3)(s)?;
         let (s, starting_length) = tagged_f32(4)(s)?;
 

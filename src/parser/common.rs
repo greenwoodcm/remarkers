@@ -1,9 +1,20 @@
 use crate::model::content::Version;
-use nom::{bytes::complete::tag, character::complete::anychar, sequence::tuple, IResult};
+use nom::{
+    bytes::complete::tag,
+    character::complete::anychar,
+    error::{ErrorKind, ParseError, VerboseError},
+    sequence::tuple,
+    Err, IResult,
+};
 
 pub type ParserAtom<'a> = &'a [u8];
 pub type ParserInput<'a> = ParserAtom<'a>;
-pub type ParserResult<'a, T> = IResult<ParserAtom<'a>, T>;
+pub type ParserError<'a> = VerboseError<ParserAtom<'a>>;
+pub type ParserResult<'a, T> = IResult<ParserAtom<'a>, T, ParserError<'a>>;
+
+pub fn error(s: ParserAtom, k: ErrorKind) -> Err<ParserError> {
+    Err::Error(VerboseError::from_error_kind(s, k))
+}
 
 pub fn u8(s: ParserInput) -> ParserResult<u8> {
     nom::number::complete::u8(s)
@@ -33,7 +44,7 @@ fn header_version(s: ParserInput) -> ParserResult<Version> {
     let (remainder, version) = anychar(s)?;
     let version: Version = version
         .try_into()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf)))?;
+        .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
 
     Ok((remainder, version))
 }

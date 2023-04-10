@@ -17,12 +17,12 @@ fn line(s: ParserInput) -> ParserResult<Line> {
     let (s, brush_type) = u32(s)?;
     let brush_type: BrushType = brush_type
         .try_into()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf)))?;
+        .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
 
     let (s, color) = u32(s)?;
     let color: Color = color
         .try_into()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(s, nom::error::ErrorKind::NoneOf)))?;
+        .map_err(|_| error(s, nom::error::ErrorKind::NoneOf))?;
 
     let (s, _padding) = u32(s)?;
     let (s, brush_size) = f32(s)?;
