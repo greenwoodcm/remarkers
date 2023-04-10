@@ -59,6 +59,12 @@ pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, output_fil
             }
         }
 
+        // indicate the notebook and page ID in the bottom left corner.  this is helpful
+        // for debugging.  x is from left edge, y is from bottom edge.
+        let text = format!("notebook: {}, page: {}", notebook.id, page.id);
+        let font = doc.add_builtin_font(BuiltinFont::Courier).unwrap();
+        current_layer.use_text(text, 48.0, Mm(10.0), Mm(10.0), &font);
+
         let (next_page, next_layer) = doc.add_page(page_width, page_height, layer_name);
         current_layer = doc.get_page(next_page).get_layer(next_layer);
         current_layer.set_fill_color(black.clone());
