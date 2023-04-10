@@ -2,6 +2,7 @@
 use std::{ffi::OsStr, fs::File, io::BufReader, path::Path};
 
 use anyhow::{Context, Result};
+use tracing::trace;
 
 use crate::model::fs::{
     serde::{ElementType, NotebookContent, NotebookContentRaw, NotebookMetadata},
@@ -14,8 +15,6 @@ pub fn scan<T: AsRef<Path>>(root: T) -> Result<Notebooks> {
     for entry in entries {
         let meta_path = match entry {
             Ok(e) => {
-                // println!("  path: {}", e.path().display());
-                // println!("  path ends with: {}", e.path().as_path().extension().and_then(OsStr::to_str) == Some("metadata"));
                 if e.path().as_path().extension().and_then(OsStr::to_str) == Some("metadata") {
                     e.path()
                 } else {
@@ -46,7 +45,6 @@ pub fn scan<T: AsRef<Path>>(root: T) -> Result<Notebooks> {
         let content_reader = BufReader::new(content_file);
 
         let content: NotebookContentRaw = serde_json::from_reader(content_reader)?;
-        println!("content raw: {:?}", &content);
         let content: NotebookContent = content.into();
 
         let pages = match &content.pages {
@@ -54,7 +52,7 @@ pub fn scan<T: AsRef<Path>>(root: T) -> Result<Notebooks> {
             None => {
                 // if there's no pages declared in metadata then we assume
                 // that there's a single .rm file in the associated directory
-                println!("looking for single page in {dir_path:?}");
+                trace!("looking for single page in {dir_path:?}");
                 std::fs::read_dir(&dir_path)
                     .context(format!("failed to read directory at {dir_path:?}"))?
                     .flat_map(|e| e.ok())
@@ -66,8 +64,6 @@ pub fn scan<T: AsRef<Path>>(root: T) -> Result<Notebooks> {
         };
 
         let pages: Vec<_> = pages.into_iter().map(|p| Page { id: p }).collect();
-
-        // println!("found notebook {meta:?} with contents {content:?}, pages {pages:?}");
 
         notebooks.push(Notebook {
             name: meta.visible_name,

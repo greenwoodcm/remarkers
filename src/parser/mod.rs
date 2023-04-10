@@ -7,10 +7,11 @@ use common::*;
 
 use anyhow::Result;
 use std::fs::read;
+use tracing::{error, info, trace};
 
 pub fn parse(s: ParserInput) -> ParserResult<(Version, Vec<Layer>)> {
     let (s, version) = header(s)?;
-    println!("parsed header version {version:?}");
+    trace!("parsed header version {version:?}");
 
     let (s, page) = match version {
         Version::V3 => panic!("can't handle v3"),
@@ -22,34 +23,32 @@ pub fn parse(s: ParserInput) -> ParserResult<(Version, Vec<Layer>)> {
 }
 
 pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> {
-    println!("parsing notebook: {notebook:?}");
+    info!("parsing notebook: {notebook:?}");
     let mut pages = Vec::new();
 
     for page in notebook.pages.iter() {
-        println!("processing page: {}", page.id);
+        trace!("processing page: {}", page.id);
 
         let page_path = notebook.root.join(format!("{}.rm", page.id));
 
         let contents = match read(&page_path) {
             Ok(contents) => contents,
             Err(_e) => {
-                println!("failed to open file at {page_path:?}");
+                error!("failed to open file at {page_path:?}");
                 continue;
             }
         };
 
         match parse(&contents) {
             Ok((_, (version, layers))) => {
-                println!("Parsed successfully: {version:?}");
+                trace!("Parsed page {} successfully with version {version:?}", page.id);
                 pages.push(Page {
                     id: page.id.clone(),
                     layers,
                 });
             }
             Err(e) => {
-                // let f: String = e;
-                // println!("Failed to parse: {:?}", e);
-                println!("Failed to parse {:?}: {}", &notebook.name, e);
+                error!("Failed to parse {:?}: {}", &notebook.name, e);
             }
         }
     }

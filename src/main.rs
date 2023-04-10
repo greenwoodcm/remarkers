@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tracing::Level;
-use tracing_subscriber::{filter::Directive, EnvFilter};
+use tracing::metadata::LevelFilter;
+use tracing_subscriber::EnvFilter;
 
 use std::env;
 use std::path::Path;
@@ -12,7 +12,11 @@ mod render;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(Directive::from(Level::TRACE)))
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::WARN.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let args: Vec<_> = env::args().collect();

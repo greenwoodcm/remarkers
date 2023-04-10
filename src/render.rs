@@ -2,6 +2,7 @@ use printpdf::*;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
+use tracing::trace;
 
 use crate::model;
 use crate::model::content::BrushType;
@@ -71,7 +72,7 @@ pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, output_fil
         current_layer.set_outline_color(black.clone());
     }
 
-    println!("writing to output path: {:?}", output_file.as_ref());
+    trace!("writing to output path: {:?}", output_file.as_ref());
     std::fs::create_dir_all(output_file.as_ref().parent().unwrap()).unwrap();
     doc.save(&mut BufWriter::new(
         File::create(output_file.as_ref()).unwrap(),
