@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+clap = { version = "4.2", features = ["derive"] }
 nom = "7.1"
 printpdf = "0.5"
 rstest = "0.17.0"
