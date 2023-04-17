@@ -9,6 +9,7 @@ mod fs;
 mod model;
 mod parser;
 mod render;
+mod sync;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()

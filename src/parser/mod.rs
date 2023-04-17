@@ -41,7 +41,10 @@ pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> 
 
         match parse(&contents) {
             Ok((_, (version, layers))) => {
-                trace!("Parsed page {} successfully with version {version:?}", page.id);
+                trace!(
+                    "Parsed page {} successfully with version {version:?}",
+                    page.id
+                );
                 pages.push(Page {
                     id: page.id.clone(),
                     layers,
