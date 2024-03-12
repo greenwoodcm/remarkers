@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::{filter::Directive, EnvFilter};
 
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
+mod device;
 mod fs;
 mod model;
 mod parser;
@@ -15,7 +16,7 @@ mod sync;
 #[command()]
 struct Cli {
     #[arg(short, long)]
-    log_level: Directive,
+    log_level: Option<Directive>,
 
     #[command(subcommand)]
     command: Command,
@@ -41,7 +42,11 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
-                .with_default_directive(cli.log_level.clone())
+                .with_default_directive(
+                    cli.log_level
+                        .clone()
+                        .unwrap_or_else(|| Directive::from_str("info").unwrap()),
+                )
                 .from_env_lossy(),
         )
         .init();
