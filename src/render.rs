@@ -7,7 +7,7 @@ use tracing::trace;
 use crate::model;
 use crate::model::content::BrushType;
 
-pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, output_file: F) {
+pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, page_filter: Box<dyn Fn(usize) -> bool>, output_file: F) {
     let page_width = Mm(model::WIDTH_PIXELS as _);
     let page_height = Mm(model::HEIGHT_PIXELS as _);
     let layer_name = "Layer 1";
@@ -24,7 +24,12 @@ pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, output_fil
     current_layer.set_fill_color(black.clone());
     current_layer.set_outline_color(black.clone());
 
-    for page in notebook.pages {
+    for (idx, page) in notebook.pages.into_iter().enumerate() {
+        if !page_filter(idx) {
+            continue;
+        }
+
+        // draw the lines
         for layer in page.layers {
             for line in layer.lines {
                 let should_draw = match line.brush_type {

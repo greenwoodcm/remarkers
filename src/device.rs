@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::{path::Path, process::Command};
+use std::{io::Write, path::Path, process::{Command, Output}};
 use tracing::{info, trace};
 
 const USB_SOURCE_USER: &str = "root";
@@ -19,17 +19,21 @@ macro_rules! cmd {
     }};
 }
 
+const WIDTH: usize = 1872;
+const HEIGHT: usize = 1404;
+const BYTES_PER_PIXEL: usize = 2;
+
+const GZIP_ENABLED: bool = false;
+
 /// Logical representation of the Remarkable, connected via SSH
 #[derive(Default)]
 pub struct Remarkable {}
 
 impl Remarkable {
-    fn do_cmd(&self, cmd: &mut Command) -> Result<(String, String)> {
+    fn do_cmd(&self, cmd: &mut Command) -> Result<Output> {
         trace!("executing cmd: {:?}", &cmd);
 
         let result = cmd.output()?;
-        let stdout = std::str::from_utf8(&result.stdout)?;
-        let stderr = std::str::from_utf8(&result.stderr)?;
 
         trace!(
             "output of {:?}: {}\nSTDOUT: {}\nSTDERR: {}",
@@ -40,7 +44,7 @@ impl Remarkable {
         );
 
         if result.status.success() {
-            Ok((stdout.to_string(), stderr.to_string()))
+            Ok(result)
         } else {
             Err(anyhow!(
                 "failed command {:?} with exit code {}",
@@ -50,7 +54,16 @@ impl Remarkable {
         }
     }
 
-    fn ssh_cmd(&self, cmd: &mut Command) -> Result<(String, String)> {
+    fn do_cmd_with_stdio(&self, cmd: &mut Command) -> Result<(String, String)> {
+        let result = self.do_cmd(cmd)?;
+
+        let stdout = std::str::from_utf8(&result.stdout)?;
+        let stderr = std::str::from_utf8(&result.stderr)?;
+
+        Ok((stdout.to_string(), stderr.to_string()))
+    }
+
+    fn cmd_to_ssh_cmd(&self, cmd: &mut Command) -> Command {
         let mut remote_cmd = vec![format!(
             "{}",
             cmd.get_program().to_str().unwrap().to_string()
@@ -60,8 +73,12 @@ impl Remarkable {
         }
         let remote_cmd = remote_cmd.join(" ");
 
-        let mut ssh_cmd = cmd!("ssh {USB_SOURCE_USER}@{USB_SOURCE_HOST} {remote_cmd}");
-        self.do_cmd(&mut ssh_cmd)
+        cmd!("ssh {USB_SOURCE_USER}@{USB_SOURCE_HOST} {remote_cmd}")
+    }
+
+    fn ssh_cmd_with_stdio(&self, cmd: &mut Command) -> Result<(String, String)> {
+        let mut ssh_cmd = self.cmd_to_ssh_cmd(cmd);
+        self.do_cmd_with_stdio(&mut ssh_cmd)
     }
 
     pub fn rsync_from<P1: AsRef<Path>, P2: AsRef<Path>>(
@@ -77,27 +94,45 @@ impl Remarkable {
 
         let mut cmd = cmd!("rsync --recursive {USB_SOURCE_USER}@{USB_SOURCE_HOST}:{remote_dir_str} {local_dir_str}");
 
-        self.do_cmd(&mut cmd).map(|_output| ())
+        self.do_cmd_with_stdio(&mut cmd).map(|_output| ())
     }
 
-    pub fn ls(&self) -> Result<(String, String)> {
-        let mut cmd = cmd!("ls");
-        self.ssh_cmd(&mut cmd)
+    pub fn streamer(&self) -> Result<RemarkableStreamer> {
+        RemarkableStreamer::new(self)
+    }
+}
+
+pub struct RemarkableStreamer<'a> {
+    #[allow(unused)]
+    remarkable: &'a Remarkable,
+    xochitl_pid: u32,
+    frame_buffer_offset: usize,
+}
+
+impl <'a> RemarkableStreamer<'a> {
+    fn new(remarkable: &'a Remarkable) -> Result<Self> {
+        let xochitl_pid = RemarkableStreamer::xochitl_pid(remarkable)?;
+        let frame_buffer_offset = RemarkableStreamer::get_frame_buffer_offset(remarkable, xochitl_pid)?;
+
+        Ok(Self {
+            remarkable,
+            xochitl_pid,
+            frame_buffer_offset,
+        })
     }
 
-    pub fn xochitl_pid(&self) -> Result<u32> {
+    fn xochitl_pid(remarkable: &Remarkable) -> Result<u32> {
         let mut cmd = cmd!("pidof xochitl");
 
-        self.ssh_cmd(&mut cmd)
+        remarkable
+            .ssh_cmd_with_stdio(&mut cmd)
             .and_then(|(stdout, _stderr)| stdout.trim().parse::<u32>().map_err(|e| e.into()))
     }
 
-    pub fn get_map(&self) -> Result<String> {
-        let pid = self.xochitl_pid()?;
+    fn get_frame_buffer_offset(remarkable: &Remarkable, pid: u32) -> Result<usize> {
         let mut cmd = cmd!("cat /proc/{pid}/maps");
 
-        let (stdout, _stderr) = self.ssh_cmd(&mut cmd)?;
-        info!("{}", &stdout);
+        let (stdout, _stderr) = remarkable.ssh_cmd_with_stdio(&mut cmd)?;
 
         let fb0_line = stdout
             .split('\n')
@@ -105,13 +140,53 @@ impl Remarkable {
             .next();
         info!("line: {fb0_line:?}");
 
-        let addr = fb0_line.ok_or(anyhow::anyhow!("asdf"))?.split('-').next();
+        let addr = fb0_line.ok_or(anyhow::anyhow!("asdf"))?.split(['-', ' ']).skip(1).next();
         info!("addr: {addr:?}");
 
         let addr_num = usize::from_str_radix(addr.unwrap(), 16)?;
         let addr_num = addr_num + 8;
         info!("addr num: {addr_num}");
-        Ok(stdout)
+        Ok(addr_num)
+    }
+
+    pub fn frame_buffer(&self) -> Result<Vec<u8>> {
+        let pid = self.xochitl_pid;
+
+        let img_bytes = WIDTH * HEIGHT * BYTES_PER_PIXEL;
+        let block_size = 4096;
+        let skip_count = self.frame_buffer_offset / block_size;
+        let block_count = (img_bytes - (self.frame_buffer_offset % block_size)).div_ceil(block_size);
+
+        let dd_begin = std::time::Instant::now();
+        let gzip_suffix = if GZIP_ENABLED { "| gzip" } else { "" };
+        let remote_cmd = format!("dd if=/proc/{pid}/mem bs={block_size} skip={skip_count} count={block_count} {gzip_suffix}");
+        let mut cmd = Command::new("ssh");
+        cmd.arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"));
+        cmd.arg(remote_cmd);
+        info!("Executing command: {cmd:?}");
+
+        let output = cmd.output()?;
+        info!("dd took {:?}", dd_begin.elapsed());
+
+        if output.status.success() {
+            if GZIP_ENABLED {
+                let mut gz = flate2::write::GzDecoder::new(Vec::new());
+                gz.write_all(&output.stdout[..])?;
+
+                let decomped = gz.finish().unwrap();
+
+                info!("Decompressed GZIP data from {} bytes to {} bytes", output.stdout.len(), decomped.len());
+                info!("results equal?: {}", decomped == &output.stdout[..]);
+                info!("buf sum: {:?}", decomped.iter().cloned().reduce(|a: u8, b| a.wrapping_add(b)));
+                Ok(decomped)
+            } else {
+                Ok(output.stdout)
+            }
+        } else {
+            Err(anyhow!(
+                "failed command [{:?}] with exit code {}: {}",
+                cmd, output.status, std::str::from_utf8(&output.stderr)?.trim()))
+        }
     }
 }
 
