@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
-use std::{io::Write, path::Path, process::{Command, Output}};
-use tracing::{info, trace};
+use std::{io::Write, path::Path, process::Command};
+use tracing::info;
+
+use crate::command::exec_cmd_with_stdio;
 
 const USB_SOURCE_USER: &str = "root";
 const USB_SOURCE_HOST: &str = "10.11.99.1";
@@ -30,39 +32,6 @@ const GZIP_ENABLED: bool = false;
 pub struct Remarkable {}
 
 impl Remarkable {
-    fn do_cmd(&self, cmd: &mut Command) -> Result<Output> {
-        trace!("executing cmd: {:?}", &cmd);
-
-        let result = cmd.output()?;
-
-        trace!(
-            "output of {:?}: {}\nSTDOUT: {}\nSTDERR: {}",
-            cmd.get_program(),
-            result.status,
-            std::str::from_utf8(&result.stdout)?,
-            std::str::from_utf8(&result.stderr)?,
-        );
-
-        if result.status.success() {
-            Ok(result)
-        } else {
-            Err(anyhow!(
-                "failed command {:?} with exit code {}",
-                cmd.get_program(),
-                result.status
-            ))
-        }
-    }
-
-    fn do_cmd_with_stdio(&self, cmd: &mut Command) -> Result<(String, String)> {
-        let result = self.do_cmd(cmd)?;
-
-        let stdout = std::str::from_utf8(&result.stdout)?;
-        let stderr = std::str::from_utf8(&result.stderr)?;
-
-        Ok((stdout.to_string(), stderr.to_string()))
-    }
-
     fn cmd_to_ssh_cmd(&self, cmd: &mut Command) -> Command {
         let mut remote_cmd = vec![format!(
             "{}",
@@ -78,7 +47,7 @@ impl Remarkable {
 
     fn ssh_cmd_with_stdio(&self, cmd: &mut Command) -> Result<(String, String)> {
         let mut ssh_cmd = self.cmd_to_ssh_cmd(cmd);
-        self.do_cmd_with_stdio(&mut ssh_cmd)
+        exec_cmd_with_stdio(&mut ssh_cmd)
     }
 
     pub fn rsync_from<P1: AsRef<Path>, P2: AsRef<Path>>(
@@ -94,7 +63,7 @@ impl Remarkable {
 
         let mut cmd = cmd!("rsync --recursive {USB_SOURCE_USER}@{USB_SOURCE_HOST}:{remote_dir_str} {local_dir_str}");
 
-        self.do_cmd_with_stdio(&mut cmd).map(|_output| ())
+        exec_cmd_with_stdio(&mut cmd).map(|_output| ())
     }
 
     pub fn streamer(&self) -> Result<RemarkableStreamer> {

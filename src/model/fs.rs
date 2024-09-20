@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Notebooks {
+    #[allow(unused)]
     pub root: PathBuf,
     pub notebooks: Vec<Notebook>,
 }

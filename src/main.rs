@@ -5,6 +5,7 @@ use tracing_subscriber::{filter::Directive, EnvFilter};
 
 use std::{path::PathBuf, str::FromStr};
 
+mod command;
 mod device;
 mod fs;
 mod model;
