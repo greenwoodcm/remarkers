@@ -1,25 +1,12 @@
 use anyhow::{anyhow, Result};
-use std::{io::Write, path::Path, process::Command};
-use tracing::info;
-
-use crate::command::exec_cmd_with_stdio;
+use ssh2::{Channel, Session};
+use std::{fs::File, io::{Read, Write}, net::TcpStream, path::{Path, PathBuf}, time::{Duration, UNIX_EPOCH}};
+use tracing::{debug, info};
 
 const USB_SOURCE_USER: &str = "root";
 const USB_SOURCE_HOST: &str = "10.11.99.1";
 
-macro_rules! cmd {
-    ($command_and_args:literal) => {{
-        let command_and_args: String = format!($command_and_args);
-        let mut elems = command_and_args.split(" ");
-
-        let program = elems.next().expect("asdf");
-        let mut cmd = std::process::Command::new(program);
-        for elem in elems {
-            cmd.arg(elem);
-        }
-        cmd
-    }};
-}
+const USB_SOURCE_ROOT_PATH: &str = "/home/root/.local/share/remarkable/xochitl/";
 
 const WIDTH: usize = 1872;
 const HEIGHT: usize = 1404;
@@ -28,46 +15,118 @@ const BYTES_PER_PIXEL: usize = 2;
 const GZIP_ENABLED: bool = false;
 
 /// Logical representation of the Remarkable, connected via SSH
-#[derive(Default)]
-pub struct Remarkable {}
+pub struct Remarkable {
+    ssh_session: Session,
+}
 
 impl Remarkable {
-    fn cmd_to_ssh_cmd(&self, cmd: &mut Command) -> Command {
-        let mut remote_cmd = vec![format!(
-            "{}",
-            cmd.get_program().to_str().unwrap().to_string()
-        )];
-        for arg in cmd.get_args() {
-            remote_cmd.push(arg.to_str().unwrap().to_string());
-        }
-        let remote_cmd = remote_cmd.join(" ");
+    pub fn open() -> Result<Self> {
+        let tcp = TcpStream::connect(
+            format!("{USB_SOURCE_HOST}:22"),
+        )?;
+        let mut ssh_session = Session::new()?;
+        ssh_session.set_tcp_stream(tcp);
+        ssh_session.handshake()?;
+        ssh_session.userauth_pubkey_file(
+            USB_SOURCE_USER,
+            Some(&PathBuf::from("/Users/greenwd/.ssh/id_rsa_remarkable.pub")),
+            &PathBuf::from("/Users/greenwd/.ssh/id_rsa_remarkable"),
+            None,
+        )?;
 
-        cmd!("ssh {USB_SOURCE_USER}@{USB_SOURCE_HOST} {remote_cmd}")
+        Ok(Self { ssh_session })
     }
 
-    fn ssh_cmd_with_stdio(&self, cmd: &mut Command) -> Result<(String, String)> {
-        let mut ssh_cmd = self.cmd_to_ssh_cmd(cmd);
-        exec_cmd_with_stdio(&mut ssh_cmd)
+    fn ssh_cmd_with_stdout<T: CmdOutput>(&self, cmd: &str) -> Result<T> {
+        info!("Executing SSH cmd: {cmd}");
+        let mut ssh_channel = self.ssh_session.channel_session()?;
+        ssh_channel.exec(cmd)?;
+
+        let mut output = T::default();
+        output.read_from_channel(&mut ssh_channel)?;
+        info!("SSH channel exit status: {:?}", ssh_channel.exit_status());
+
+        ssh_channel.wait_close()?;
+
+        Ok(output)
     }
 
-    pub fn rsync_from<P1: AsRef<Path>, P2: AsRef<Path>>(
+    pub fn rsync_from_device_to<P: AsRef<Path>>(
         &self,
-        from_remote_dir: P1,
-        to_local_dir: P2,
+        to_local_dir: P,
     ) -> Result<()> {
-        let remote_dir = from_remote_dir.as_ref();
+        let remote_dir = PathBuf::from(USB_SOURCE_ROOT_PATH);
         let local_dir = to_local_dir.as_ref();
+        info!("syncing reMarkable tablet content to local directory: {local_dir:?}");
 
-        let remote_dir_str = path_to_str(remote_dir)?;
-        let local_dir_str = path_to_str(local_dir)?;
+        let ftp = self.ssh_session.sftp()?;
+        let root_dir = ftp.readdir(&remote_dir)?;
 
-        let mut cmd = cmd!("rsync --recursive {USB_SOURCE_USER}@{USB_SOURCE_HOST}:{remote_dir_str} {local_dir_str}");
+        let mut created = 0;
+        let mut updated = 0;
+        let mut skipped = 0;
+        for (path, stat) in root_dir {
+            debug!("Sync evaluating {path:?}");
+            let rel_path = path.strip_prefix(&remote_dir)?;
+            let local_path = local_dir.join(rel_path);
 
-        exec_cmd_with_stdio(&mut cmd).map(|_output| ())
+            match std::fs::metadata(&local_path) {
+                Ok(meta) => {
+                    let remote_mod = Duration::from_secs(stat.mtime.ok_or(anyhow!(""))?);
+                    let local_mod = meta
+                        .modified()?
+                        .duration_since(UNIX_EPOCH)?;
+                    debug!("Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}");
+
+                    if remote_mod > local_mod {
+                        debug!("Syncing based on newer mtime: {rel_path:?} to {local_path:?}");
+                        let mut remote_file = ftp.open(&path)?;
+                        let mut local_file = File::create(&local_path)?;
+                        std::io::copy(&mut remote_file, &mut local_file)?;
+                        updated += 1;
+                    } else {
+                        debug!("Syncing based on older mtime: {rel_path:?} to {local_path:?}");
+                        skipped += 1;
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        debug!("Creating based on missing local file: {rel_path:?} to {local_path:?}");
+                        let mut remote_file = ftp.open(&path)?;
+                        let mut local_file = File::create(&local_path)?;
+                        std::io::copy(&mut remote_file, &mut local_file)?;
+                        created += 1;
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
+        info!("Sync created {created} files, updated {updated} files, skipped {skipped} files");
+        Ok(())
     }
 
     pub fn streamer(&self) -> Result<RemarkableStreamer> {
         RemarkableStreamer::new(self)
+    }
+}
+
+trait CmdOutput: Default {
+    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()>;
+}
+
+impl CmdOutput for String {
+    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()> {
+        channel.read_to_string(self)?;
+        Ok(())
+    }
+}
+
+impl CmdOutput for Vec<u8> {
+    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()> {
+        channel.read_to_end(self)?;
+        Ok(())
     }
 }
 
@@ -91,17 +150,14 @@ impl <'a> RemarkableStreamer<'a> {
     }
 
     fn xochitl_pid(remarkable: &Remarkable) -> Result<u32> {
-        let mut cmd = cmd!("pidof xochitl");
-
         remarkable
-            .ssh_cmd_with_stdio(&mut cmd)
-            .and_then(|(stdout, _stderr)| stdout.trim().parse::<u32>().map_err(|e| e.into()))
+            .ssh_cmd_with_stdout("pidof xochitl")
+            .and_then(|stdout: String| stdout.trim().parse::<u32>().map_err(|e| e.into()))
     }
 
     fn get_frame_buffer_offset(remarkable: &Remarkable, pid: u32) -> Result<usize> {
-        let mut cmd = cmd!("cat /proc/{pid}/maps");
-
-        let (stdout, _stderr) = remarkable.ssh_cmd_with_stdio(&mut cmd)?;
+        let cmd = format!("cat /proc/{pid}/maps");
+        let stdout: String = remarkable.ssh_cmd_with_stdout(&cmd)?;
 
         let fb0_line = stdout
             .split('\n')
@@ -129,73 +185,20 @@ impl <'a> RemarkableStreamer<'a> {
         let dd_begin = std::time::Instant::now();
         let gzip_suffix = if GZIP_ENABLED { "| gzip" } else { "" };
         let remote_cmd = format!("dd if=/proc/{pid}/mem bs={block_size} skip={skip_count} count={block_count} {gzip_suffix}");
-        let mut cmd = Command::new("ssh");
-        cmd.arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"));
-        cmd.arg(remote_cmd);
-        info!("Executing command: {cmd:?}");
 
-        let output = cmd.output()?;
+        let output: Vec<u8> = self.remarkable.ssh_cmd_with_stdout(&remote_cmd)?;
         info!("dd took {:?}", dd_begin.elapsed());
 
-        if output.status.success() {
-            if GZIP_ENABLED {
-                let mut gz = flate2::write::GzDecoder::new(Vec::new());
-                gz.write_all(&output.stdout[..])?;
+        if GZIP_ENABLED {
+            let mut gz = flate2::write::GzDecoder::new(Vec::new());
+            gz.write_all(&output[..])?;
 
-                let decomped = gz.finish().unwrap();
+            let decomped = gz.finish().unwrap();
 
-                info!("Decompressed GZIP data from {} bytes to {} bytes", output.stdout.len(), decomped.len());
-                info!("results equal?: {}", decomped == &output.stdout[..]);
-                info!("buf sum: {:?}", decomped.iter().cloned().reduce(|a: u8, b| a.wrapping_add(b)));
-                Ok(decomped)
-            } else {
-                Ok(output.stdout)
-            }
+            info!("Decompressed GZIP data from {} bytes to {} bytes", output.len(), decomped.len());
+            Ok(decomped)
         } else {
-            Err(anyhow!(
-                "failed command [{:?}] with exit code {}: {}",
-                cmd, output.status, std::str::from_utf8(&output.stderr)?.trim()))
+            Ok(output)
         }
-    }
-}
-
-fn path_to_str(p: &Path) -> Result<&str> {
-    p.to_str().ok_or(anyhow!("failed to stringify path: {p:?}"))
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_cmd_macro() {
-        let cmd = cmd!("abc");
-        let actual = unpack_command(&cmd);
-
-        assert_eq!("abc", actual.0);
-        assert_eq!(Vec::<&str>::new(), actual.1);
-
-        let cmd = cmd!("abc def");
-        let actual = unpack_command(&cmd);
-
-        assert_eq!("abc", actual.0);
-        assert_eq!(vec!["def"], actual.1);
-
-        let lit = 12345;
-        let cmd = cmd!("abc arg_{lit}");
-        let actual = unpack_command(&cmd);
-
-        assert_eq!("abc", actual.0);
-        assert_eq!(vec!["arg_12345"], actual.1);
-    }
-
-    fn unpack_command<'a>(cmd: &'a Command) -> (&'a str, Vec<&'a str>) {
-        let program = cmd.get_program().to_str().unwrap();
-        let args: Vec<_> = cmd
-            .get_args()
-            .into_iter()
-            .map(|a| a.to_str().unwrap())
-            .collect();
-        (program, args)
     }
 }

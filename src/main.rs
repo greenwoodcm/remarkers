@@ -5,14 +5,12 @@ use tracing_subscriber::{filter::Directive, EnvFilter};
 
 use std::{path::PathBuf, str::FromStr};
 
-mod command;
 mod device;
 mod fs;
 mod model;
 mod parser;
 mod render;
 mod stream;
-mod sync;
 
 #[derive(Parser, Debug)]
 #[command()]
@@ -67,7 +65,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Sync { dest_dir } => {
-            sync::sync_remarkable_to_dir(dest_dir)?;
+            let rem = crate::device::Remarkable::open()?;
+            rem.rsync_from_device_to(dest_dir)?;
         }
         Command::Convert {
             source_dir,

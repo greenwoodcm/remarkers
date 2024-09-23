@@ -28,7 +28,7 @@ const MIN_DURATION_PER_FRAME: Duration = Duration::from_millis(100);
 pub fn stream() -> Result<()> {
     info!("streaming reMarkable tablet");
 
-    let rem = crate::device::Remarkable::default();
+    let rem = crate::device::Remarkable::open()?;
 
     let window = create_window("image", WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32]))?;
     let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES).expect("failed to parse font");
@@ -75,7 +75,7 @@ pub fn stream() -> Result<()> {
 }
 
 pub fn grab_frame(dest_file: impl AsRef<Path>) -> Result<()> {
-    let rem = crate::device::Remarkable::default();
+    let rem = crate::device::Remarkable::open()?;
     let streamer = rem.streamer()?;
     let mut frame_buffer = vec![0u8; HEIGHT * WIDTH];
     let image = get_frame(&streamer, &mut frame_buffer)?;
