@@ -3,10 +3,10 @@ use std::{
 };
 
 use ab_glyph::Font;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma};
 use show_image::{create_window, WindowOptions};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::device::RemarkableStreamer;
 
@@ -30,9 +30,15 @@ pub fn stream() -> Result<()> {
 
     let rem = crate::device::Remarkable::open()?;
 
-    let window = create_window("image", WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32]))?;
-    let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES).expect("failed to parse font");
-    let scale = font.pt_to_px_scale(FONT_SIZE).expect("failed to build PxScale from font size");
+    let window = create_window(
+        "reMarkable device stream",
+        WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32])
+    )?;
+
+    let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES)
+        .context("failed to parse font")?;
+    let scale = font.pt_to_px_scale(FONT_SIZE)
+        .with_context(|| format!("failed to build PxScale from font size {FONT_SIZE}"))?;
 
     let streamer = rem.streamer()?;
     let mut frame_buffer = vec![0u8; HEIGHT * WIDTH];
@@ -65,10 +71,10 @@ pub fn stream() -> Result<()> {
         window.set_image("image-001", image)?;
 
         let frame_duration = frame_begin.elapsed();
-        info!("frame latency: {frame_duration:?}");
-    
+        debug!("frame latency: {frame_duration:?}");
+
         if frame_duration < MIN_DURATION_PER_FRAME {
-            info!("sleeping for {:?}", MIN_DURATION_PER_FRAME - frame_duration);
+            debug!("sleeping for {:?}", MIN_DURATION_PER_FRAME - frame_duration);
             std::thread::sleep(MIN_DURATION_PER_FRAME - frame_duration);
         }
     }
@@ -124,14 +130,14 @@ fn get_frame(streamer: &RemarkableStreamer, frame_buffer: &mut Vec<u8>) -> Resul
         frame_buffer[i] = (pixel as f32 / 30.0 * 255.0) as u8;
     }
 
-    info!("vec latency: {:?}", image_buffer_begin.elapsed());
+    debug!("byte buffer to pixel buffer latency: {:?}", image_buffer_begin.elapsed());
 
     let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_vec(WIDTH as _, HEIGHT as _, frame_buffer.clone()).unwrap();
-    info!("buffer new latency: {:?}", image_buffer_begin.elapsed());
     let image = DynamicImage::ImageLuma8(buffer)
         .rotate270()
         .fliph()
         .to_rgb8();
-    info!("image_buffer latency: {:?}", image_buffer_begin.elapsed());
+    debug!("pixel buffer to ImageBuffer latency: {:?}", image_buffer_begin.elapsed());
+
     Ok(image)
 }
