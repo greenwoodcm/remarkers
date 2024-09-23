@@ -12,7 +12,22 @@ const WIDTH: usize = 1872;
 const HEIGHT: usize = 1404;
 const BYTES_PER_PIXEL: usize = 2;
 
+/// Whether to GZIP compress frame data on the device and then decompress
+/// the data client side after the transfer.
 const GZIP_ENABLED: bool = false;
+
+/// Whether to use dynamically linked libssh2 for the remote `dd` command
+/// or shell out to the `ssh` binary.
+/// 
+/// Performance testing of these two flags suggests that doing neither
+/// is the best option:
+/// 
+/// gzip  ssh2
+/// false false = 440-540 ms per frame
+/// false true  = 660-720 ms per frame
+/// true  false = 680-700 ms per frame
+/// true  true  = 520-550 ms per frame
+const SSH2_ENABLED: bool = false;
 
 /// Logical representation of the Remarkable, connected via SSH
 pub struct Remarkable {
@@ -39,16 +54,30 @@ impl Remarkable {
 
     fn ssh_cmd_with_stdout<T: CmdOutput>(&self, cmd: &str) -> Result<T> {
         info!("Executing SSH cmd: {cmd}");
-        let mut ssh_channel = self.ssh_session.channel_session()?;
-        ssh_channel.exec(cmd)?;
 
-        let mut output = T::default();
-        output.read_from_channel(&mut ssh_channel)?;
-        info!("SSH channel exit status: {:?}", ssh_channel.exit_status());
+        let start = std::time::Instant::now();
 
-        ssh_channel.wait_close()?;
-
-        Ok(output)
+        if SSH2_ENABLED {
+            let mut ssh_channel = self.ssh_session.channel_session()?;
+            debug!("SSH channel opened in {:?}", start.elapsed());
+            ssh_channel.exec(cmd)?;
+            debug!("SSH channel executed in {:?}", start.elapsed());
+    
+            let output = T::read_from_channel(&mut ssh_channel)?;
+            debug!("SSH channel read-from in {:?}", start.elapsed());
+            debug!("SSH channel exit status: {:?}", ssh_channel.exit_status());
+    
+            ssh_channel.wait_close()?;
+            debug!("SSH channel closed in {:?}", start.elapsed());
+            Ok(output)
+        } else {
+            let output = std::process::Command::new("ssh")
+                .arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"))
+                .arg(cmd)
+                .output()?;
+            debug!("SSH executed in {:?}", start.elapsed());
+            Ok(T::from_vec(output.stdout))
+        }
     }
 
     pub fn rsync_from_device_to<P: AsRef<Path>>(
@@ -113,20 +142,31 @@ impl Remarkable {
 }
 
 trait CmdOutput: Default {
-    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()>;
+    fn from_vec(vec: Vec<u8>) -> Self;
+    fn read_from_channel(channel: &mut Channel) -> Result<Self>;
 }
 
 impl CmdOutput for String {
-    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()> {
-        channel.read_to_string(self)?;
-        Ok(())
+    fn from_vec(vec: Vec<u8>) -> Self {
+        String::from_utf8(vec).unwrap()
+    }
+
+    fn read_from_channel(channel: &mut Channel) -> Result<Self> {
+        let mut s = String::new();
+        channel.read_to_string(&mut s)?;
+        Ok(s)
     }
 }
 
 impl CmdOutput for Vec<u8> {
-    fn read_from_channel(&mut self, channel: &mut Channel) -> Result<()> {
-        channel.read_to_end(self)?;
-        Ok(())
+    fn read_from_channel(channel: &mut Channel) -> Result<Self> {
+        let mut vec = Vec::with_capacity(WIDTH * HEIGHT * BYTES_PER_PIXEL);
+        channel.read_to_end(&mut vec)?;
+        Ok(vec)
+    }
+
+    fn from_vec(vec: Vec<u8>) -> Self {
+        vec
     }
 }
 
