@@ -1,5 +1,6 @@
 use std::{
-    path::Path, time::{Duration, Instant}
+    path::Path,
+    time::{Duration, Instant},
 };
 
 use ab_glyph::Font;
@@ -16,13 +17,13 @@ const HEIGHT: usize = 1404;
 const FONT_BYTES: &[u8] = include_bytes!("../static/Amazon-Ember-Medium.ttf");
 const FONT_SIZE: f32 = 18.0;
 // black
-const TEXT_COLOR: image::Rgb<u8> = image::Rgb([0, 0, 0]); 
+const TEXT_COLOR: image::Rgb<u8> = image::Rgb([0, 0, 0]);
 const TEXT_MARGIN_PX: u32 = 10;
 
 const MIN_DURATION_PER_FRAME: Duration = Duration::from_millis(100);
 
 /// Stream the reMarkable tablet to the local screen.
-/// 
+///
 /// Inspired by:
 /// https://blog.owulveryck.info/2021/03/30/streaming-the-remarkable-2.html
 pub fn stream(show_diagnostics: bool) -> Result<()> {
@@ -32,12 +33,12 @@ pub fn stream(show_diagnostics: bool) -> Result<()> {
 
     let window = create_window(
         "reMarkable device stream",
-        WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32])
+        WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32]),
     )?;
 
-    let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES)
-        .context("failed to parse font")?;
-    let scale = font.pt_to_px_scale(FONT_SIZE)
+    let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES).context("failed to parse font")?;
+    let scale = font
+        .pt_to_px_scale(FONT_SIZE)
         .with_context(|| format!("failed to build PxScale from font size {FONT_SIZE}"))?;
 
     let streamer = rem.streamer()?;
@@ -49,14 +50,14 @@ pub fn stream(show_diagnostics: bool) -> Result<()> {
         if show_diagnostics {
             let frame_processing_duration = frame_begin.elapsed();
             let frame_rate = 1.0 / frame_processing_duration.as_secs_f32();
-            let debug_text = format!("frame latency: {}ms rate: {frame_rate:.2}fps", frame_processing_duration.as_millis());
-        
-            let (text_width, text_height) = imageproc::drawing::text_size(
-                scale,
-                &font,
-                &debug_text,
+            let debug_text = format!(
+                "frame latency: {}ms rate: {frame_rate:.2}fps",
+                frame_processing_duration.as_millis()
             );
-        
+
+            let (text_width, text_height) =
+                imageproc::drawing::text_size(scale, &font, &debug_text);
+
             let x = image.width() - text_width - TEXT_MARGIN_PX;
             let y = image.height() - text_height - TEXT_MARGIN_PX;
             imageproc::drawing::draw_text_mut(
@@ -89,17 +90,20 @@ pub fn grab_frame(dest_file: impl AsRef<Path>) -> Result<()> {
     let image = get_frame(&streamer, &mut frame_buffer)?;
 
     let ext = dest_file.as_ref().extension();
-    let fmt = ImageFormat::from_extension(ext
-        .ok_or_else(|| anyhow!("Image file extension required"))?)
-        .ok_or_else(|| anyhow!("File extension {:?} invalid", ext))?;
+    let fmt =
+        ImageFormat::from_extension(ext.ok_or_else(|| anyhow!("Image file extension required"))?)
+            .ok_or_else(|| anyhow!("File extension {:?} invalid", ext))?;
     let mut f = std::fs::File::create(dest_file)?;
     image.write_to(&mut f, fmt)?;
     Ok(())
 }
 
-fn get_frame(streamer: &RemarkableStreamer, frame_buffer: &mut Vec<u8>) -> Result<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
+fn get_frame(
+    streamer: &RemarkableStreamer,
+    frame_buffer: &mut Vec<u8>,
+) -> Result<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
     let bytes = streamer.frame_buffer()?;
-    
+
     ////////////////////////////////////////////////////////////////
     // Old code that used ffmpeg to do the RAW video to image conversion,
     // which is now done directly in Rust instead.
@@ -132,14 +136,22 @@ fn get_frame(streamer: &RemarkableStreamer, frame_buffer: &mut Vec<u8>) -> Resul
         frame_buffer[i] = (pixel as f32 / 30.0 * 255.0) as u8;
     }
 
-    debug!("byte buffer to pixel buffer latency: {:?}", image_buffer_begin.elapsed());
+    debug!(
+        "byte buffer to pixel buffer latency: {:?}",
+        image_buffer_begin.elapsed()
+    );
 
-    let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_vec(WIDTH as _, HEIGHT as _, frame_buffer.clone()).unwrap();
+    let buffer =
+        ImageBuffer::<Luma<u8>, Vec<u8>>::from_vec(WIDTH as _, HEIGHT as _, frame_buffer.clone())
+            .unwrap();
     let image = DynamicImage::ImageLuma8(buffer)
         .rotate270()
         .fliph()
         .to_rgb8();
-    debug!("pixel buffer to ImageBuffer latency: {:?}", image_buffer_begin.elapsed());
+    debug!(
+        "pixel buffer to ImageBuffer latency: {:?}",
+        image_buffer_begin.elapsed()
+    );
 
     Ok(image)
 }

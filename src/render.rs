@@ -7,7 +7,11 @@ use tracing::trace;
 use crate::model;
 use crate::model::content::BrushType;
 
-pub fn render_pdf<F: AsRef<Path>>(notebook: model::content::Notebook, page_filter: Box<dyn Fn(usize) -> bool>, output_file: F) {
+pub fn render_pdf<F: AsRef<Path>>(
+    notebook: model::content::Notebook,
+    page_filter: Box<dyn Fn(usize) -> bool>,
+    output_file: F,
+) {
     let page_width = Mm(model::WIDTH_PIXELS as _);
     let page_height = Mm(model::HEIGHT_PIXELS as _);
     let layer_name = "Layer 1";

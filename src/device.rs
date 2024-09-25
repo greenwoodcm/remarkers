@@ -1,6 +1,12 @@
 use anyhow::{anyhow, Result};
 use ssh2::{Channel, Session};
-use std::{fs::File, io::{Read, Write}, net::TcpStream, path::{Path, PathBuf}, time::{Duration, UNIX_EPOCH}};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    net::TcpStream,
+    path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
+};
 use tracing::{debug, info};
 
 const USB_SOURCE_USER: &str = "root";
@@ -18,10 +24,10 @@ const GZIP_ENABLED: bool = false;
 
 /// Whether to use dynamically linked libssh2 for the remote `dd` command
 /// or shell out to the `ssh` binary.
-/// 
+///
 /// Performance testing of these two flags suggests that doing neither
 /// is the best option:
-/// 
+///
 /// gzip  ssh2
 /// false false = 440-540 ms per frame
 /// false true  = 660-720 ms per frame
@@ -36,9 +42,7 @@ pub struct Remarkable {
 
 impl Remarkable {
     pub fn open() -> Result<Self> {
-        let tcp = TcpStream::connect(
-            format!("{USB_SOURCE_HOST}:22"),
-        )?;
+        let tcp = TcpStream::connect(format!("{USB_SOURCE_HOST}:22"))?;
         let mut ssh_session = Session::new()?;
         ssh_session.set_tcp_stream(tcp);
         ssh_session.handshake()?;
@@ -62,11 +66,11 @@ impl Remarkable {
             debug!("SSH channel opened in {:?}", start.elapsed());
             ssh_channel.exec(cmd)?;
             debug!("SSH channel executed in {:?}", start.elapsed());
-    
+
             let output = T::read_from_channel(&mut ssh_channel)?;
             debug!("SSH channel read-from in {:?}", start.elapsed());
             debug!("SSH channel exit status: {:?}", ssh_channel.exit_status());
-    
+
             ssh_channel.wait_close()?;
             debug!("SSH channel closed in {:?}", start.elapsed());
             Ok(output)
@@ -80,10 +84,7 @@ impl Remarkable {
         }
     }
 
-    pub fn rsync_from_device_to<P: AsRef<Path>>(
-        &self,
-        to_local_dir: P,
-    ) -> Result<()> {
+    pub fn rsync_from_device_to<P: AsRef<Path>>(&self, to_local_dir: P) -> Result<()> {
         let remote_dir = PathBuf::from(USB_SOURCE_ROOT_PATH);
         let local_dir = to_local_dir.as_ref();
         info!("syncing reMarkable tablet content to local directory: {local_dir:?}");
@@ -102,9 +103,7 @@ impl Remarkable {
             match std::fs::metadata(&local_path) {
                 Ok(meta) => {
                     let remote_mod = Duration::from_secs(stat.mtime.ok_or(anyhow!(""))?);
-                    let local_mod = meta
-                        .modified()?
-                        .duration_since(UNIX_EPOCH)?;
+                    let local_mod = meta.modified()?.duration_since(UNIX_EPOCH)?;
                     debug!("Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}");
 
                     if remote_mod > local_mod {
@@ -120,7 +119,9 @@ impl Remarkable {
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
-                        debug!("Creating based on missing local file: {rel_path:?} to {local_path:?}");
+                        debug!(
+                            "Creating based on missing local file: {rel_path:?} to {local_path:?}"
+                        );
                         let mut remote_file = ftp.open(&path)?;
                         let mut local_file = File::create(&local_path)?;
                         std::io::copy(&mut remote_file, &mut local_file)?;
@@ -177,10 +178,11 @@ pub struct RemarkableStreamer<'a> {
     frame_buffer_offset: usize,
 }
 
-impl <'a> RemarkableStreamer<'a> {
+impl<'a> RemarkableStreamer<'a> {
     fn new(remarkable: &'a Remarkable) -> Result<Self> {
         let xochitl_pid = RemarkableStreamer::xochitl_pid(remarkable)?;
-        let frame_buffer_offset = RemarkableStreamer::get_frame_buffer_offset(remarkable, xochitl_pid)?;
+        let frame_buffer_offset =
+            RemarkableStreamer::get_frame_buffer_offset(remarkable, xochitl_pid)?;
 
         Ok(Self {
             remarkable,
@@ -205,7 +207,11 @@ impl <'a> RemarkableStreamer<'a> {
             .next();
         info!("line: {fb0_line:?}");
 
-        let addr = fb0_line.ok_or(anyhow::anyhow!("asdf"))?.split(['-', ' ']).skip(1).next();
+        let addr = fb0_line
+            .ok_or(anyhow::anyhow!("asdf"))?
+            .split(['-', ' '])
+            .skip(1)
+            .next();
         info!("addr: {addr:?}");
 
         let addr_num = usize::from_str_radix(addr.unwrap(), 16)?;
@@ -220,7 +226,8 @@ impl <'a> RemarkableStreamer<'a> {
         let img_bytes = WIDTH * HEIGHT * BYTES_PER_PIXEL;
         let block_size = 4096;
         let skip_count = self.frame_buffer_offset / block_size;
-        let block_count = (img_bytes - (self.frame_buffer_offset % block_size)).div_ceil(block_size);
+        let block_count =
+            (img_bytes - (self.frame_buffer_offset % block_size)).div_ceil(block_size);
 
         let dd_begin = std::time::Instant::now();
         let gzip_suffix = if GZIP_ENABLED { "| gzip" } else { "" };
@@ -235,7 +242,11 @@ impl <'a> RemarkableStreamer<'a> {
 
             let decomped = gz.finish().unwrap();
 
-            info!("Decompressed GZIP data from {} bytes to {} bytes", output.len(), decomped.len());
+            info!(
+                "Decompressed GZIP data from {} bytes to {} bytes",
+                output.len(),
+                decomped.len()
+            );
             Ok(decomped)
         } else {
             Ok(output)

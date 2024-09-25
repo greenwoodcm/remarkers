@@ -44,7 +44,7 @@ enum Command {
         diagnostics: bool,
     },
     GrabFrame {
-        #[arg(short, long, default_value="remarkable-frame.png")]
+        #[arg(short, long, default_value = "remarkable-frame.png")]
         dest_file: PathBuf,
     },
 }
