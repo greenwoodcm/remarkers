@@ -43,13 +43,12 @@ enum Command {
         #[arg(short, long)]
         diagnostics: bool,
     },
-    GrabFrame {
+    Screengrab {
         #[arg(short, long, default_value = "remarkable-frame.png")]
         dest_file: PathBuf,
     },
 }
 
-#[show_image::main]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -111,9 +110,11 @@ fn main() -> Result<()> {
             }
         }
         Command::Stream { diagnostics } => {
-            crate::stream::stream(diagnostics)?;
+            show_image::run_context(move || {
+                crate::stream::stream(diagnostics).unwrap();
+            })
         }
-        Command::GrabFrame { dest_file } => {
+        Command::Screengrab { dest_file } => {
             crate::stream::grab_frame(&dest_file)?;
         }
     }
