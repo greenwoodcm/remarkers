@@ -25,7 +25,7 @@ const MIN_DURATION_PER_FRAME: Duration = Duration::from_millis(100);
 /// 
 /// Inspired by:
 /// https://blog.owulveryck.info/2021/03/30/streaming-the-remarkable-2.html
-pub fn stream() -> Result<()> {
+pub fn stream(show_diagnostics: bool) -> Result<()> {
     info!("streaming reMarkable tablet");
 
     let rem = crate::device::Remarkable::open()?;
@@ -46,27 +46,29 @@ pub fn stream() -> Result<()> {
         let frame_begin = Instant::now();
         let mut image = get_frame(&streamer, &mut frame_buffer)?;
 
-        let frame_processing_duration = frame_begin.elapsed();
-        let frame_rate = 1.0 / frame_processing_duration.as_secs_f32();
-        let debug_text = format!("frame latency: {}ms rate: {frame_rate:.2}fps", frame_processing_duration.as_millis());
-    
-        let (text_width, text_height) = imageproc::drawing::text_size(
-            scale,
-            &font,
-            &debug_text,
-        );
-    
-        let x = image.width() - text_width - TEXT_MARGIN_PX;
-        let y = image.height() - text_height - TEXT_MARGIN_PX;
-        imageproc::drawing::draw_text_mut(
-            &mut image,
-            TEXT_COLOR,
-            x as _,
-            y as _,
-            scale,
-            &font,
-            &debug_text,
-        );
+        if show_diagnostics {
+            let frame_processing_duration = frame_begin.elapsed();
+            let frame_rate = 1.0 / frame_processing_duration.as_secs_f32();
+            let debug_text = format!("frame latency: {}ms rate: {frame_rate:.2}fps", frame_processing_duration.as_millis());
+        
+            let (text_width, text_height) = imageproc::drawing::text_size(
+                scale,
+                &font,
+                &debug_text,
+            );
+        
+            let x = image.width() - text_width - TEXT_MARGIN_PX;
+            let y = image.height() - text_height - TEXT_MARGIN_PX;
+            imageproc::drawing::draw_text_mut(
+                &mut image,
+                TEXT_COLOR,
+                x as _,
+                y as _,
+                scale,
+                &font,
+                &debug_text,
+            );
+        }
 
         window.set_image("image-001", image)?;
 

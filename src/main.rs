@@ -38,7 +38,11 @@ enum Command {
         #[arg(short, long)]
         page_filter: Option<String>,
     },
-    Stream {},
+    Stream {
+        /// Enable diagnostics as an overlay, including frame latency and frame rate.
+        #[arg(short, long)]
+        diagnostics: bool,
+    },
     GrabFrame {
         #[arg(short, long, default_value="remarkable-frame.png")]
         dest_file: PathBuf,
@@ -106,8 +110,8 @@ fn main() -> Result<()> {
                 render::render_pdf(parsed_notebook, page_range, output_path);
             }
         }
-        Command::Stream {} => {
-            crate::stream::stream()?;
+        Command::Stream { diagnostics } => {
+            crate::stream::stream(diagnostics)?;
         }
         Command::GrabFrame { dest_file } => {
             crate::stream::grab_frame(&dest_file)?;
