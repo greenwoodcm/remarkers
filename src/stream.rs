@@ -26,7 +26,7 @@ const MIN_DURATION_PER_FRAME: Duration = Duration::from_millis(100);
 ///
 /// Inspired by:
 /// https://blog.owulveryck.info/2021/03/30/streaming-the-remarkable-2.html
-pub fn stream(show_diagnostics: bool) -> Result<()> {
+pub async fn stream(show_diagnostics: bool) -> Result<()> {
     info!("streaming reMarkable tablet");
 
     let rem = crate::device::Remarkable::open()?;
@@ -41,17 +41,26 @@ pub fn stream(show_diagnostics: bool) -> Result<()> {
         .pt_to_px_scale(FONT_SIZE)
         .with_context(|| format!("failed to build PxScale from font size {FONT_SIZE}"))?;
 
-    let streamer = rem.streamer()?;
+    let streamer = rem.streamer().await?;
     let mut frame_buffer = vec![0u8; HEIGHT * WIDTH];
+    let mut frame_errors = 0;
     loop {
         let frame_begin = Instant::now();
-        let mut image = get_frame(&streamer, &mut frame_buffer)?;
+        let image = get_frame(&streamer, &mut frame_buffer).await;
+        let mut image = match image {
+            Ok(im) => im,
+            Err(_e) => {
+                frame_errors += 1;
+                continue;
+            }
+        };
 
         if show_diagnostics {
             let frame_processing_duration = frame_begin.elapsed();
             let frame_rate = 1.0 / frame_processing_duration.as_secs_f32();
             let debug_text = format!(
-                "frame latency: {}ms rate: {frame_rate:.2}fps",
+                "frame errors: {} latency: {}ms rate: {frame_rate:.2}fps",
+                frame_errors,
                 frame_processing_duration.as_millis()
             );
 
@@ -83,11 +92,11 @@ pub fn stream(show_diagnostics: bool) -> Result<()> {
     }
 }
 
-pub fn grab_frame(dest_file: impl AsRef<Path>) -> Result<()> {
+pub async fn grab_frame(dest_file: impl AsRef<Path>) -> Result<()> {
     let rem = crate::device::Remarkable::open()?;
-    let streamer = rem.streamer()?;
+    let streamer = rem.streamer().await?;
     let mut frame_buffer = vec![0u8; HEIGHT * WIDTH];
-    let image = get_frame(&streamer, &mut frame_buffer)?;
+    let image = get_frame(&streamer, &mut frame_buffer).await?;
 
     let ext = dest_file.as_ref().extension();
     let fmt =
@@ -98,11 +107,11 @@ pub fn grab_frame(dest_file: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-fn get_frame(
-    streamer: &RemarkableStreamer,
+async fn get_frame(
+    streamer: &RemarkableStreamer<'_>,
     frame_buffer: &mut Vec<u8>,
 ) -> Result<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
-    let bytes = streamer.frame_buffer()?;
+    let bytes = streamer.frame_buffer().await?;
 
     ////////////////////////////////////////////////////////////////
     // Old code that used ffmpeg to do the RAW video to image conversion,

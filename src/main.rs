@@ -49,7 +49,9 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+#[show_image::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -110,12 +112,10 @@ fn main() -> Result<()> {
             }
         }
         Command::Stream { diagnostics } => {
-            show_image::run_context(move || {
-                crate::stream::stream(diagnostics).unwrap();
-            })
+            crate::stream::stream(diagnostics).await.unwrap();
         }
         Command::Screengrab { dest_file } => {
-            crate::stream::grab_frame(&dest_file)?;
+            crate::stream::grab_frame(&dest_file).await?;
         }
     }
 

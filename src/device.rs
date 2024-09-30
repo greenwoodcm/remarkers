@@ -5,9 +5,10 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, UNIX_EPOCH},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const USB_SOURCE_USER: &str = "root";
 const USB_SOURCE_HOST: &str = "10.11.99.1";
@@ -17,6 +18,9 @@ const USB_SOURCE_ROOT_PATH: &str = "/home/root/.local/share/remarkable/xochitl/"
 const WIDTH: usize = 1872;
 const HEIGHT: usize = 1404;
 const BYTES_PER_PIXEL: usize = 2;
+
+const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+const FRAME_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether to GZIP compress frame data on the device and then decompress
 /// the data client side after the transfer.
@@ -56,8 +60,8 @@ impl Remarkable {
         Ok(Self { ssh_session })
     }
 
-    fn ssh_cmd_with_stdout<T: CmdOutput>(&self, cmd: &str) -> Result<T> {
-        info!("Executing SSH cmd: {cmd}");
+    async fn ssh_cmd_with_stdout<T: CmdOutput>(&self, cmd: &str, timeout: Duration) -> Result<T> {
+        debug!("Executing SSH cmd: {cmd}");
 
         let start = std::time::Instant::now();
 
@@ -75,10 +79,14 @@ impl Remarkable {
             debug!("SSH channel closed in {:?}", start.elapsed());
             Ok(output)
         } else {
-            let output = std::process::Command::new("ssh")
-                .arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"))
-                .arg(cmd)
-                .output()?;
+            let cmd = async {
+                std::process::Command::new("ssh")
+                    .arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"))
+                    .arg(cmd)
+                    .output()
+            };
+
+            let output = tokio::time::timeout(timeout, cmd).await??;
             debug!("SSH executed in {:?}", start.elapsed());
             Ok(T::from_vec(output.stdout))
         }
@@ -137,8 +145,8 @@ impl Remarkable {
         Ok(())
     }
 
-    pub fn streamer(&self) -> Result<RemarkableStreamer> {
-        RemarkableStreamer::new(self)
+    pub async fn streamer(&self) -> Result<RemarkableStreamer> {
+        RemarkableStreamer::new(self).await
     }
 }
 
@@ -174,32 +182,44 @@ impl CmdOutput for Vec<u8> {
 pub struct RemarkableStreamer<'a> {
     #[allow(unused)]
     remarkable: &'a Remarkable,
+    stream_info: Mutex<RemarkableStreamInfo>,
+}
+
+struct RemarkableStreamInfo {
     xochitl_pid: u32,
     frame_buffer_offset: usize,
 }
 
 impl<'a> RemarkableStreamer<'a> {
-    fn new(remarkable: &'a Remarkable) -> Result<Self> {
-        let xochitl_pid = RemarkableStreamer::xochitl_pid(remarkable)?;
-        let frame_buffer_offset =
-            RemarkableStreamer::get_frame_buffer_offset(remarkable, xochitl_pid)?;
-
+    async fn new(remarkable: &'a Remarkable) -> Result<Self> {
         Ok(Self {
             remarkable,
+            stream_info: Mutex::new(RemarkableStreamer::stream_info(remarkable).await?),
+        })
+    }
+
+    async fn stream_info(remarkable: &Remarkable) -> Result<RemarkableStreamInfo> {
+        let xochitl_pid = RemarkableStreamer::xochitl_pid(remarkable).await?;
+        let frame_buffer_offset =
+            RemarkableStreamer::get_frame_buffer_offset(remarkable, xochitl_pid).await?;
+        Ok(RemarkableStreamInfo {
             xochitl_pid,
             frame_buffer_offset,
         })
     }
 
-    fn xochitl_pid(remarkable: &Remarkable) -> Result<u32> {
+    async fn xochitl_pid(remarkable: &Remarkable) -> Result<u32> {
         remarkable
-            .ssh_cmd_with_stdout("pidof xochitl")
+            .ssh_cmd_with_stdout("pidof xochitl", METADATA_COMMAND_TIMEOUT)
+            .await
             .and_then(|stdout: String| stdout.trim().parse::<u32>().map_err(|e| e.into()))
     }
 
-    fn get_frame_buffer_offset(remarkable: &Remarkable, pid: u32) -> Result<usize> {
+    async fn get_frame_buffer_offset(remarkable: &Remarkable, pid: u32) -> Result<usize> {
         let cmd = format!("cat /proc/{pid}/maps");
-        let stdout: String = remarkable.ssh_cmd_with_stdout(&cmd)?;
+        let stdout: String = remarkable
+            .ssh_cmd_with_stdout(&cmd, METADATA_COMMAND_TIMEOUT)
+            .await?;
 
         let fb0_line = stdout
             .split('\n')
@@ -220,36 +240,61 @@ impl<'a> RemarkableStreamer<'a> {
         Ok(addr_num)
     }
 
-    pub fn frame_buffer(&self) -> Result<Vec<u8>> {
-        let pid = self.xochitl_pid;
+    pub async fn frame_buffer(&self) -> Result<Vec<u8>> {
+        let (pid, frame_buffer_offset) = {
+            let stream_info = self.stream_info.lock().expect("failed to lock stream info");
+            (stream_info.xochitl_pid, stream_info.frame_buffer_offset)
+        };
 
         let img_bytes = WIDTH * HEIGHT * BYTES_PER_PIXEL;
         let block_size = 4096;
-        let skip_count = self.frame_buffer_offset / block_size;
-        let block_count =
-            (img_bytes - (self.frame_buffer_offset % block_size)).div_ceil(block_size);
+        let skip_count = frame_buffer_offset / block_size;
+        let block_count = (img_bytes - (frame_buffer_offset % block_size)).div_ceil(block_size);
 
         let dd_begin = std::time::Instant::now();
         let gzip_suffix = if GZIP_ENABLED { "| gzip" } else { "" };
         let remote_cmd = format!("dd if=/proc/{pid}/mem bs={block_size} skip={skip_count} count={block_count} {gzip_suffix}");
 
-        let output: Vec<u8> = self.remarkable.ssh_cmd_with_stdout(&remote_cmd)?;
-        info!("dd took {:?}", dd_begin.elapsed());
+        let result: Result<Vec<u8>, _> = self
+            .remarkable
+            .ssh_cmd_with_stdout(&remote_cmd, FRAME_COMMAND_TIMEOUT)
+            .await;
+        info!(
+            "dd completed with success {} in {:?}",
+            result.is_ok(),
+            dd_begin.elapsed()
+        );
 
-        if GZIP_ENABLED {
-            let mut gz = flate2::write::GzDecoder::new(Vec::new());
-            gz.write_all(&output[..])?;
+        match result {
+            Ok(output) => {
+                if GZIP_ENABLED {
+                    let mut gz = flate2::write::GzDecoder::new(Vec::new());
+                    gz.write_all(&output[..])?;
 
-            let decomped = gz.finish().unwrap();
+                    let decomped = gz.finish().unwrap();
 
-            info!(
-                "Decompressed GZIP data from {} bytes to {} bytes",
-                output.len(),
-                decomped.len()
-            );
-            Ok(decomped)
-        } else {
-            Ok(output)
+                    info!(
+                        "Decompressed GZIP data from {} bytes to {} bytes",
+                        output.len(),
+                        decomped.len()
+                    );
+                    Ok(decomped)
+                } else {
+                    Ok(output)
+                }
+            }
+            Err(e) => {
+                warn!("Error issuing dd to Remarkable: {e:?}");
+
+                // in the case of a failure to complete the dd command
+                // we want to refresh the pid and frame buffer offset
+                // just in case they've changed
+                let mut cached_stream_info =
+                    self.stream_info.lock().expect("failed to lock stream info");
+                *cached_stream_info = RemarkableStreamer::stream_info(&self.remarkable).await?;
+
+                Err(e)
+            }
         }
     }
 }
