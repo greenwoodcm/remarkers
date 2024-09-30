@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
-use tracing_subscriber::{filter::Directive, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
-use std::{path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
 mod device;
 mod fs;
@@ -12,11 +12,13 @@ mod parser;
 mod render;
 mod stream;
 
+const DEFAULT_LOG_DIRECTIVE: [&str; 3] = ["warn", "naga=error", "remarkers=info"];
+
 #[derive(Parser, Debug)]
 #[command()]
 struct Cli {
     #[arg(short, long)]
-    log_level: Option<Directive>,
+    log_directive: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -49,21 +51,33 @@ enum Command {
     },
 }
 
+fn env_filter_from_directives<'a>(
+    directives: impl IntoIterator<Item = &'a str>,
+) -> Result<EnvFilter> {
+    let mut filter = EnvFilter::default();
+    for d in directives.into_iter() {
+        filter = filter.add_directive(d.parse()?);
+    }
+    Ok(filter)
+}
+
+fn build_env_filter(cli: &Cli) -> Result<EnvFilter> {
+    if let Ok(env_var) = std::env::var("RUST_LOG") {
+        env_filter_from_directives(env_var.split(","))
+    } else if let Some(directives) = &cli.log_directive {
+        env_filter_from_directives(directives.split(","))
+    } else {
+        env_filter_from_directives(DEFAULT_LOG_DIRECTIVE)
+    }
+}
+
 #[tokio::main]
 #[show_image::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(
-                    cli.log_level
-                        .clone()
-                        .unwrap_or_else(|| Directive::from_str("info").unwrap()),
-                )
-                .from_env_lossy(),
-        )
+        .with_env_filter(build_env_filter(&cli)?)
         .init();
 
     info!("Parsed CLI command: {:?}", cli);

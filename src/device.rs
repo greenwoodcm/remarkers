@@ -225,18 +225,22 @@ impl<'a> RemarkableStreamer<'a> {
             .split('\n')
             .filter(|line| line.contains("/dev/fb0"))
             .next();
-        info!("line: {fb0_line:?}");
+        debug!("line containing /dev/fb0: {fb0_line:?}");
 
         let addr = fb0_line
-            .ok_or(anyhow::anyhow!("asdf"))?
+            .ok_or(anyhow!("failed to find /dev/fb0 in /proc/{pid}/maps"))?
             .split(['-', ' '])
             .skip(1)
-            .next();
-        info!("addr: {addr:?}");
+            .next()
+            .ok_or(anyhow!(
+                "failed to find frame buffer offset in [{fb0_line:?}]"
+            ))?;
+        debug!("frame buffer offset string: {addr:?}");
 
-        let addr_num = usize::from_str_radix(addr.unwrap(), 16)?;
+        let addr_num = usize::from_str_radix(addr, 16)?;
         let addr_num = addr_num + 8;
-        info!("addr num: {addr_num}");
+        debug!("frame buffer offset: {addr_num}");
+
         Ok(addr_num)
     }
 
@@ -259,7 +263,7 @@ impl<'a> RemarkableStreamer<'a> {
             .remarkable
             .ssh_cmd_with_stdout(&remote_cmd, FRAME_COMMAND_TIMEOUT)
             .await;
-        info!(
+        debug!(
             "dd completed with success {} in {:?}",
             result.is_ok(),
             dd_begin.elapsed()
@@ -273,7 +277,7 @@ impl<'a> RemarkableStreamer<'a> {
 
                     let decomped = gz.finish().unwrap();
 
-                    info!(
+                    debug!(
                         "Decompressed GZIP data from {} bytes to {} bytes",
                         output.len(),
                         decomped.len()
