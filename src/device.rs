@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ssh2::{Channel, Session};
 use std::{
     fs::File,
@@ -79,14 +79,15 @@ impl Remarkable {
             debug!("SSH channel closed in {:?}", start.elapsed());
             Ok(output)
         } else {
-            let cmd = async {
-                std::process::Command::new("ssh")
-                    .arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"))
-                    .arg(cmd)
-                    .output()
-            };
+            let cmd = tokio::process::Command::new("ssh")
+                .arg(format!("{USB_SOURCE_USER}@{USB_SOURCE_HOST}"))
+                .arg(cmd)
+                .output();
 
-            let output = tokio::time::timeout(timeout, cmd).await??;
+            let output = tokio::time::timeout(timeout, cmd)
+                .await
+                .context("timed out waiting for SSH command")?
+                .context("error executing SSH command")?;
             debug!("SSH executed in {:?}", start.elapsed());
             Ok(T::from_vec(output.stdout))
         }
