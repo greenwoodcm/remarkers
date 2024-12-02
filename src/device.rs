@@ -94,8 +94,14 @@ impl Remarkable {
     }
 
     pub fn rsync_from_device_to<P: AsRef<Path>>(&self, to_local_dir: P) -> Result<()> {
-        let remote_dir = PathBuf::from(USB_SOURCE_ROOT_PATH);
+        self.rsync_from_device_dir_to(USB_SOURCE_ROOT_PATH, to_local_dir)
+            .map(|_stats| ())
+    }
+
+    fn rsync_from_device_dir_to<P0: AsRef<Path>, P1: AsRef<Path>>(&self, from_device_dir: P0, to_local_dir: P1) -> Result<(u32, u32, u32)> {
+        let remote_dir = from_device_dir.as_ref();
         let local_dir = to_local_dir.as_ref();
+        std::fs::create_dir_all(local_dir)?;
         info!("syncing reMarkable tablet content to local directory: {local_dir:?}");
 
         let ftp = self.ssh_session.sftp()?;
@@ -109,41 +115,55 @@ impl Remarkable {
             let rel_path = path.strip_prefix(&remote_dir)?;
             let local_path = local_dir.join(rel_path);
 
-            match std::fs::metadata(&local_path) {
-                Ok(meta) => {
-                    let remote_mod = Duration::from_secs(stat.mtime.ok_or(anyhow!(""))?);
-                    let local_mod = meta.modified()?.duration_since(UNIX_EPOCH)?;
-                    debug!("Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}");
-
-                    if remote_mod > local_mod {
-                        debug!("Syncing based on newer mtime: {rel_path:?} to {local_path:?}");
-                        let mut remote_file = ftp.open(&path)?;
-                        let mut local_file = File::create(&local_path)?;
-                        std::io::copy(&mut remote_file, &mut local_file)?;
-                        updated += 1;
-                    } else {
-                        debug!("Syncing based on older mtime: {rel_path:?} to {local_path:?}");
-                        skipped += 1;
+            if stat.is_dir() {
+                debug!("Traversing remote directory {path:?}");
+                let (inner_created, inner_updated, inner_skipped) = self.rsync_from_device_dir_to(&path, local_path)?;
+                created += inner_created;
+                updated += inner_updated;
+                skipped += inner_skipped;
+            } else {
+                debug!("Encountered file, checking local filesystem for {local_path:?}");
+                match std::fs::metadata(&local_path) {
+                    Ok(meta) => {
+                        let remote_mod = Duration::from_secs(stat.mtime.ok_or(anyhow!(""))?);
+                        let local_mod = meta.modified()?.duration_since(UNIX_EPOCH)?;
+                        debug!("Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}");
+    
+                        if remote_mod > local_mod {
+                            debug!("Syncing based on newer mtime: {rel_path:?} to {local_path:?}");
+                            let mut remote_file = ftp.open(&path)?;
+                            let mut local_file = File::create(&local_path)?;
+                            std::io::copy(&mut remote_file, &mut local_file)?;
+                            updated += 1;
+                        } else {
+                            debug!("Syncing based on older mtime: {rel_path:?} to {local_path:?}");
+                            skipped += 1;
+                        }
                     }
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        debug!(
-                            "Creating based on missing local file: {rel_path:?} to {local_path:?}"
-                        );
-                        let mut remote_file = ftp.open(&path)?;
-                        let mut local_file = File::create(&local_path)?;
-                        std::io::copy(&mut remote_file, &mut local_file)?;
-                        created += 1;
-                    } else {
-                        return Err(e.into());
+                    Err(e) => {
+                        debug!("Error fetching file metadata: {e:?}");
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            debug!(
+                                "Creating based on missing local file: {rel_path:?} to {local_path:?}"
+                            );
+                            let mut remote_file = ftp.open(&path)?;
+                            let mut local_file = File::create(&local_path)?;
+                            std::io::copy(&mut remote_file, &mut local_file)
+                                .map_err(|e| {
+                                    debug!("Error copying from remote to local: {e:?}");
+                                    anyhow!("Error copying from remote to local: {e:?}")
+                                })?;
+                            created += 1;
+                        } else {
+                            return Err(e.into());
+                        }
                     }
                 }
             }
         }
 
         info!("Sync created {created} files, updated {updated} files, skipped {skipped} files");
-        Ok(())
+        Ok((created, updated, skipped))
     }
 
     pub async fn streamer(&self) -> Result<RemarkableStreamer> {
