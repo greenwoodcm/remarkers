@@ -1,3 +1,4 @@
+use color::to_pdf_color;
 use printpdf::*;
 use std::fs::File;
 use std::io::BufWriter;
@@ -6,6 +7,8 @@ use tracing::trace;
 
 use crate::model;
 use crate::model::content::BrushType;
+
+mod color;
 
 pub fn render_pdf<F: AsRef<Path>>(
     notebook: model::content::Notebook,
@@ -25,8 +28,6 @@ pub fn render_pdf<F: AsRef<Path>>(
     let black = Color::Greyscale(Greyscale::new(0.0, None));
 
     let mut current_layer = doc.get_page(page1).get_layer(layer1);
-    current_layer.set_fill_color(black.clone());
-    current_layer.set_outline_color(black.clone());
 
     for (idx, page) in notebook.pages.into_iter().enumerate() {
         if !page_filter(idx) {
@@ -43,6 +44,10 @@ pub fn render_pdf<F: AsRef<Path>>(
                 if !should_draw {
                     continue;
                 }
+
+                let pdf_color = to_pdf_color(line.color);
+                current_layer.set_fill_color(pdf_color.clone());
+                current_layer.set_outline_color(pdf_color.clone());
 
                 for segment in line.points.windows(2) {
                     let x0 = segment[0].x as f64;
@@ -67,6 +72,9 @@ pub fn render_pdf<F: AsRef<Path>>(
                     current_layer.set_outline_thickness(segment[0].width as _);
                     current_layer.add_shape(line1);
                 }
+
+                current_layer.set_fill_color(color::PDF_BLACK);
+                current_layer.set_outline_color(color::PDF_BLACK);
             }
         }
 
