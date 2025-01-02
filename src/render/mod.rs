@@ -56,13 +56,14 @@ pub fn render_pdf<F: AsRef<Path>>(
                     ];
 
                     let line1 = Line {
-                        points: points,
+                        points: points.clone(),
                         is_closed: true,
                         has_fill: true,
                         has_stroke: true,
                         is_clipping_path: false,
                     };
 
+                    tracing::debug!("rendering point {:?} at thickness {}", points, segment[0].width);
                     current_layer.set_outline_thickness(segment[0].width as _);
                     current_layer.add_shape(line1);
                 }

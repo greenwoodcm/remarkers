@@ -208,6 +208,7 @@ fn point(version: u8) -> impl Fn(ParserInput) -> ParserResult<Point> {
         let x = x + (model::WIDTH_PIXELS / 2) as f32;
 
         let (s, y) = f32(s)?;
+        info!("using version: {version}");
         let (s, speed, direction, width, pressure) = match version {
             1 => {
                 let (s, speed) = f32(s)?;
@@ -239,6 +240,7 @@ fn point(version: u8) -> impl Fn(ParserInput) -> ParserResult<Point> {
         };
 
         // adjust width
+        trace!("point: {x}, {y}, {speed}, {direction}, {width}, {pressure}");
         let width = width * 2.0 / 255.0;
         trace!("point: {x}, {y}, {speed}, {direction}, {width}, {pressure}");
         Ok((
@@ -269,7 +271,7 @@ fn line_item_subblock(version: u8) -> impl Fn(ParserInput) -> ParserResult<LineI
         let (s, thickness_scale) = tagged_f64(3)(s)?;
         let (s, starting_length) = tagged_f32(4)(s)?;
 
-        trace!("brush type: {brush_type:?}, color id: {color_id}, thickness scale: {thickness_scale}, starting len: {starting_length}");
+        trace!("brush type: {brush_type:?}, color id: {color_id}, color: {color:?}, thickness scale: {thickness_scale}, starting len: {starting_length}");
 
         // read another subblock for the point vector
         let (s, _) = stream_tag(5, TagType::Length4)(s)?;

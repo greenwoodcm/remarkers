@@ -104,7 +104,6 @@ impl TryFrom<u32> for BrushType {
 #[derive(Debug)]
 pub struct Line {
     pub brush_type: BrushType,
-    #[allow(unused)]
     pub color: Color,
     #[allow(unused)]
     pub brush_size: f32,
