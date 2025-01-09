@@ -68,7 +68,11 @@ pub fn render_pdf<F: AsRef<Path>>(
                         is_clipping_path: false,
                     };
 
-                    tracing::debug!("rendering point {:?} at thickness {}", points, segment[0].width);
+                    tracing::debug!(
+                        "rendering point {:?} at thickness {}",
+                        points,
+                        segment[0].width
+                    );
                     current_layer.set_outline_thickness(segment[0].width as _);
                     current_layer.add_shape(line1);
                 }

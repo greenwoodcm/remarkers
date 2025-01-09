@@ -1,5 +1,5 @@
-use printpdf::{Color as PdfColor, Rgb};
 use crate::model::content::Color as ModelColor;
+use printpdf::{Color as PdfColor, Rgb};
 
 pub const PDF_BLACK: PdfColor = to_pdf_color(ModelColor::Black);
 
@@ -15,5 +15,10 @@ pub const fn to_pdf_color(color: ModelColor) -> PdfColor {
         ModelColor::Red => (1.0, 0.0, 0.0),
         ModelColor::GreyOverlap => todo!(),
     };
-    PdfColor::Rgb(Rgb { r, g, b, icc_profile: None })
+    PdfColor::Rgb(Rgb {
+        r,
+        g,
+        b,
+        icc_profile: None,
+    })
 }

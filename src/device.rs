@@ -98,11 +98,15 @@ impl Remarkable {
             .map(|_stats| ())
     }
 
-    fn rsync_from_device_dir_to<P0: AsRef<Path>, P1: AsRef<Path>>(&self, from_device_dir: P0, to_local_dir: P1) -> Result<(u32, u32, u32)> {
+    fn rsync_from_device_dir_to<P0: AsRef<Path>, P1: AsRef<Path>>(
+        &self,
+        from_device_dir: P0,
+        to_local_dir: P1,
+    ) -> Result<(u32, u32, u32)> {
         let remote_dir = from_device_dir.as_ref();
         let local_dir = to_local_dir.as_ref();
-        std::fs::create_dir_all(local_dir)?;
         info!("syncing reMarkable tablet content to local directory: {local_dir:?}");
+        std::fs::create_dir_all(local_dir)?;
 
         let ftp = self.ssh_session.sftp()?;
         let root_dir = ftp.readdir(&remote_dir)?;
@@ -117,7 +121,8 @@ impl Remarkable {
 
             if stat.is_dir() {
                 debug!("Traversing remote directory {path:?}");
-                let (inner_created, inner_updated, inner_skipped) = self.rsync_from_device_dir_to(&path, local_path)?;
+                let (inner_created, inner_updated, inner_skipped) =
+                    self.rsync_from_device_dir_to(&path, local_path)?;
                 created += inner_created;
                 updated += inner_updated;
                 skipped += inner_skipped;
@@ -127,8 +132,10 @@ impl Remarkable {
                     Ok(meta) => {
                         let remote_mod = Duration::from_secs(stat.mtime.ok_or(anyhow!(""))?);
                         let local_mod = meta.modified()?.duration_since(UNIX_EPOCH)?;
-                        debug!("Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}");
-    
+                        debug!(
+                            "Sync encountered remote_mod={remote_mod:?}, local_mod={local_mod:?}"
+                        );
+
                         if remote_mod > local_mod {
                             debug!("Syncing based on newer mtime: {rel_path:?} to {local_path:?}");
                             let mut remote_file = ftp.open(&path)?;
@@ -148,11 +155,10 @@ impl Remarkable {
                             );
                             let mut remote_file = ftp.open(&path)?;
                             let mut local_file = File::create(&local_path)?;
-                            std::io::copy(&mut remote_file, &mut local_file)
-                                .map_err(|e| {
-                                    debug!("Error copying from remote to local: {e:?}");
-                                    anyhow!("Error copying from remote to local: {e:?}")
-                                })?;
+                            std::io::copy(&mut remote_file, &mut local_file).map_err(|e| {
+                                debug!("Error copying from remote to local: {e:?}");
+                                anyhow!("Error copying from remote to local: {e:?}")
+                            })?;
                             created += 1;
                         } else {
                             return Err(e.into());
