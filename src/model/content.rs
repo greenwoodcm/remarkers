@@ -27,6 +27,7 @@ pub struct Notebook {
 #[derive(Debug)]
 pub struct Page {
     pub id: String,
+    pub version: Version,
     pub layers: Vec<Layer>,
 }
 

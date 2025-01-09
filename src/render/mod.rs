@@ -3,10 +3,10 @@ use printpdf::*;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
-use tracing::trace;
+use tracing::{debug, info, trace};
 
 use crate::model;
-use crate::model::content::BrushType;
+use crate::model::content::{BrushType, Version};
 
 mod color;
 
@@ -30,6 +30,9 @@ pub fn render_pdf<F: AsRef<Path>>(
     let mut current_layer = doc.get_page(page1).get_layer(layer1);
 
     for (idx, page) in notebook.pages.into_iter().enumerate() {
+        let mut cumulative_thickness = 0.0;
+        let mut point_count = 0;
+
         if !page_filter(idx) {
             continue;
         }
@@ -68,13 +71,42 @@ pub fn render_pdf<F: AsRef<Path>>(
                         is_clipping_path: false,
                     };
 
-                    tracing::debug!(
-                        "rendering point {:?} at thickness {}",
-                        points,
-                        segment[0].width
+                    // for V6 the width per point / line segment is
+                    // very noisy.  there are random segments that render
+                    // extremely thin, segments that do not show up in the
+                    // source or screen rendering.  it seems that there is either
+                    // some alternate interpretation of the width field for certain
+                    // points (e.g. width values below 1.0 should be ignored or something)
+                    // or screen rendering is applying some smoothing process to line
+                    // widths.  to account for this, here we naively just render each
+                    // line as the max width observed across all points.  we likely lose
+                    // some visual specificity here (you can't draw a single line that
+                    // changes in thickness through the line) but it renders much better
+                    // than rendering the point widths unmodified.
+                    //
+                    // TODO: is there a better approach to smoothing?
+                    // TODO: should this be done in parsing?
+                    let effective_thickness = match page.version {
+                        Version::V3 => segment[0].width,
+                        Version::V5 => segment[0].width,
+                        Version::V6 => {
+                            let mut max_over_points: f32 = 0.0;
+                            for point in &line.points {
+                                max_over_points = max_over_points.max(point.width);
+                            }
+                            max_over_points * 4.0
+                        }
+                    };
+
+                    debug!(
+                        "rendering point {:?} at thickness {} / {} => {}",
+                        points, segment[0].width, segment[1].width, effective_thickness
                     );
-                    current_layer.set_outline_thickness(segment[0].width as _);
+                    current_layer.set_outline_thickness(effective_thickness as _);
                     current_layer.add_shape(line1);
+
+                    cumulative_thickness += segment[0].width;
+                    point_count += 1;
                 }
 
                 current_layer.set_fill_color(color::PDF_BLACK);
@@ -92,6 +124,9 @@ pub fn render_pdf<F: AsRef<Path>>(
         current_layer = doc.get_page(next_page).get_layer(next_layer);
         current_layer.set_fill_color(black.clone());
         current_layer.set_outline_color(black.clone());
+
+        let avg_thickness = cumulative_thickness / point_count as f32;
+        info!("page stats: points={point_count}, cumulative_thickness={cumulative_thickness}, avg_thickness={avg_thickness}");
     }
 
     trace!("writing to output path: {:?}", output_file.as_ref());

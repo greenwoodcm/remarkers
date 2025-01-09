@@ -47,6 +47,7 @@ pub fn parse_notebook(notebook: crate::model::fs::Notebook) -> Result<Notebook> 
                 );
                 pages.push(Page {
                     id: page.id.clone(),
+                    version,
                     layers,
                 });
             }
