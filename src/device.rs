@@ -8,7 +8,7 @@ use std::{
     sync::Mutex,
     time::{Duration, UNIX_EPOCH},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 const USB_SOURCE_USER: &str = "root";
 const USB_SOURCE_HOST: &str = "10.11.99.1";
@@ -46,7 +46,9 @@ pub struct Remarkable {
 
 impl Remarkable {
     pub fn open() -> Result<Self> {
+        trace!("Connecting to Remarkable at {USB_SOURCE_HOST}:22");
         let tcp = TcpStream::connect(format!("{USB_SOURCE_HOST}:22"))?;
+        trace!("Established TCP connection to Remarkable");
         let mut ssh_session = Session::new()?;
         ssh_session.set_tcp_stream(tcp);
         ssh_session.handshake()?;
@@ -57,6 +59,7 @@ impl Remarkable {
             None,
         )?;
 
+        trace!("Connected to Remarkable at {USB_SOURCE_HOST}:22");
         Ok(Self { ssh_session })
     }
 

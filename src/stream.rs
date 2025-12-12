@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ab_glyph::Font;
+use rusttype::{Font, Scale};
 use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma};
 use show_image::{create_window, WindowOptions};
@@ -36,10 +36,8 @@ pub async fn stream(show_diagnostics: bool) -> Result<()> {
         WindowOptions::default().set_size([HEIGHT as u32, WIDTH as u32]),
     )?;
 
-    let font = ab_glyph::FontArc::try_from_slice(FONT_BYTES).context("failed to parse font")?;
-    let scale = font
-        .pt_to_px_scale(FONT_SIZE)
-        .with_context(|| format!("failed to build PxScale from font size {FONT_SIZE}"))?;
+    let font = Font::try_from_bytes(FONT_BYTES).context("failed to parse font")?;
+    let scale = Scale::uniform(FONT_SIZE);
 
     let streamer = rem.streamer().await?;
     let mut frame_buffer = vec![0u8; HEIGHT * WIDTH];
@@ -67,8 +65,8 @@ pub async fn stream(show_diagnostics: bool) -> Result<()> {
             let (text_width, text_height) =
                 imageproc::drawing::text_size(scale, &font, &debug_text);
 
-            let x = image.width() - text_width - TEXT_MARGIN_PX;
-            let y = image.height() - text_height - TEXT_MARGIN_PX;
+            let x = image.width() - text_width as u32 - TEXT_MARGIN_PX;
+            let y = image.height() - text_height as u32 - TEXT_MARGIN_PX;
             imageproc::drawing::draw_text_mut(
                 &mut image,
                 TEXT_COLOR,
